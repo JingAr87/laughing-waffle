@@ -28,15 +28,20 @@ cp "$HERE/dts/zx279128r-dlink-dir-x3060z.dts" \
 cp "$HERE/dts/zx279128r-dlink-dir-x1860z.dts" \
    "$TREE/target/linux/sanechips/dts/zx279128r-dlink-dir-x1860z.dts"
 
-echo "[2/7] Installing ZX279128S/R kernel fixes (U-Boot eth DMA quiesce + ZTE earlycon)..."
+echo "[2/7] Installing ZX279128S/R kernel fixes (U-Boot eth DMA quiesce, ZTE earlycon, eth TX/RX perf)..."
 mkdir -p "$TREE/target/linux/sanechips/patches-6.18"
 mkdir -p "$TREE/target/linux/sanechips/files/arch/arm/mach-zte"
+mkdir -p "$TREE/target/linux/sanechips/files/drivers/net/ethernet/zte"
 cp "$HERE/patches-6.18/900-amba-pl011-zte-earlycon.patch" \
    "$TREE/target/linux/sanechips/patches-6.18/900-amba-pl011-zte-earlycon.patch"
 cp "$HERE/patches-6.18/901-arm-compressed-zx279128s-quiesce-eth.patch" \
    "$TREE/target/linux/sanechips/patches-6.18/901-arm-compressed-zx279128s-quiesce-eth.patch"
 cp "$HERE/files/arch/arm/mach-zte/zx279128s.c" \
    "$TREE/target/linux/sanechips/files/arch/arm/mach-zte/zx279128s.c"
+cp "$HERE/files/drivers/net/ethernet/zte/zx279128s-eth.h" \
+   "$TREE/target/linux/sanechips/files/drivers/net/ethernet/zte/zx279128s-eth.h"
+cp "$HERE/files/drivers/net/ethernet/zte/zx279128s-main.c" \
+   "$TREE/target/linux/sanechips/files/drivers/net/ethernet/zte/zx279128s-main.c"
 
 echo "[3/7] Removing E2631-only flash/LED/userdata/Chinese scripts..."
 BF="$TREE/target/linux/sanechips/base-files"
