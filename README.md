@@ -64,3 +64,15 @@ mtd erase others && reboot   # Restore factory Slot 0 selector and boot Stock
   - [`port/pack_x3060z.py`](port/pack_x3060z.py) — Standalone `0x1E0` firmware header packer & verifier (`480/480` byte-exact self-test across all 4 slots).
   - [`port/base-files/`](port/base-files/) — Calibration loader (`11-mt76-caldata`), deferred Wi-Fi binder (`e2631-wifi-on`), factory MAC loader (`02_network`), LED triggers (`01_leds`), native `sysupgrade` (`lib/upgrade/platform.sh`), and slot switcher (`x3060z-fwslot`).
   - [`port/BUILD_GUIDE.md`](port/BUILD_GUIDE.md) — Linux/WSL2 build, UART TFTP RAM-boot, and flashing guide.
+
+---
+
+## Credits & Acknowledgments
+This port builds on the work of the OpenWrt and Sanechips community:
+- **Navid Ghahremani** & the **`sanechips` target (`pr-zte-zxhn-h3600`, mirrored at `Zlion-Y/openwrt-sanechips-mirror`)** — Linux 6.18 `ZX279128S` SoC bring-up (`zx279128s-eth`, `pcie-zx279128s`, `zx-qspi`, `L2C-310` IO-read lock, and JFFS2 program-once support).
+- **`zte-e2631-openwrt`** — 256 MiB / 128 MiB `ZX279128S` router conventions and deferred `mt7915e` Wi-Fi bring-up scripts.
+- **Stefan Dösinger** — `zx29` PL011 UART support in `amba-pl011`.
+- **OpenWrt & MediaTek `mt76` contributors** — OpenWrt build system, LuCI, and `mt7915e` Wi-Fi 6 driver.
+
+## License
+Licensed under **GPL-2.0-only** — see [`LICENSE`](LICENSE) for details. Device Tree files are dual-licensed `GPL-2.0-only OR BSD-2-Clause`.
