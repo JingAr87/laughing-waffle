@@ -1,0 +1,392 @@
+// SPDX-License-Identifier: GPL-2.0-only OR BSD-2-Clause
+/*
+ * D-Link DIR-X3060Z (HW V1.0, TM / Unifi Malaysia AX3000 Wi-Fi 6 Router)
+ * SoC       : Sanechips / ZTE ZX279128R (cputype=3, 128s family, dual Cortex-A9 @ 1 GHz, no VFP/NEON)
+ * RAM       : 256 MiB DDR3 (ESMT M15T2G16128A)
+ * Flash     : 128 MiB 3.3V SPI-NAND (ESMT F50L1G41LB, 2 KiB page, 128 KiB eraseblock)
+ * Wi-Fi     : MediaTek Filogic 630 (MT7916AN + MT7976DN/DM, PCIe0 14c3:7906 + PCIe1 14c3:790a)
+ * Ethernet  : 1x GbE WAN + 3x GbE LAN (4x integrated Sanechips GbE PHYs at MDIO 0xa..0xd)
+ * Bootloader: U-Boot CTCRV1.0.0 (20220808184253, non-secure, 0x1E0 slot header + legacy uImage)
+ *
+ * All memory addresses, MTD partition offsets (from vmlinux 0xc042d918), MDIO PHY addresses
+ * (from vmlinux uni_phy @ 0xc05d1a90 = {0x0d, 0x0a, 0x0b, 0x0c}), and GPIO tables
+ * (from vmlinux 0xc05ba580 / 0xc05bab80, Board ID 0x47 ZX279128R / F628S) were verified
+ * directly from a full 128 MiB flash dump of a live unit.
+ */
+
+/dts-v1/;
+
+#include "zte/zx279128s.dtsi"
+#include <dt-bindings/gpio/gpio.h>
+#include <dt-bindings/input/input.h>
+#include <dt-bindings/leds/common.h>
+
+/ {
+	model = "D-Link DIR-X3060Z";
+	compatible = "dlink,dir-x3060z", "zte,zx279128r", "zte,zx279128s";
+
+	aliases {
+		ethernet0 = &gmac;
+		serial0 = &serial0;
+		serial1 = &serial1;
+		led-boot = &led_power;
+		led-failsafe = &led_power;
+		led-running = &led_power;
+		led-upgrade = &led_internet;
+	};
+
+	chosen {
+		stdout-path = "serial0:115200n8";
+	};
+
+	memory@40000000 {
+		device_type = "memory";
+		reg = <0x40000000 0x10000000>; /* 256 MiB DDR3 */
+	};
+
+	leds {
+		compatible = "gpio-leds";
+
+		/*
+		 * GPIO table extracted from stock vmlinux.bin @ 0xc05ba580 (Board ID 0x47,
+		 * ZX279128R / F628S) + bspdriver.ko (hw_led_wlan_mtk -> slot 61):
+		 *   Flat GPIO = bank * 16 + pin (6 banks gpio0..gpio5 of 16 lines each)
+		 *   - Flat GPIO  6 (&gpio0  6): Output / Power LED (ACTIVE_HIGH, slot 53)
+		 *   - Flat GPIO 17 (&gpio1  1): Output / Internet LED (ACTIVE_HIGH, slot 4)
+		 *   - Flat GPIO 53 (&gpio3  5): Output / Wi-Fi LED (ACTIVE_HIGH, slot 61)
+		 *   - Flat GPIO 56..59 (&gpio3 8..11): Hardware-driven GbE LAN1..3 / WAN PHY LEDs
+		 */
+		led_power: led-power {
+			label = "dir-x3060z:green:power";
+			color = <LED_COLOR_ID_GREEN>;
+			function = LED_FUNCTION_POWER;
+			gpios = <&gpio0 6 GPIO_ACTIVE_HIGH>;
+			default-state = "on";
+		};
+
+		led_internet: led-internet {
+			label = "dir-x3060z:green:internet";
+			color = <LED_COLOR_ID_GREEN>;
+			function = LED_FUNCTION_WAN_ONLINE;
+			gpios = <&gpio1 1 GPIO_ACTIVE_HIGH>;
+			default-state = "off";
+		};
+
+		led_wlan: led-wlan {
+			label = "dir-x3060z:green:wlan";
+			color = <LED_COLOR_ID_GREEN>;
+			function = LED_FUNCTION_WLAN;
+			gpios = <&gpio3 5 GPIO_ACTIVE_HIGH>;
+			default-state = "off";
+		};
+
+		led_lan1: led-lan1 {
+			label = "dir-x3060z:green:lan1";
+			color = <LED_COLOR_ID_GREEN>;
+			function = LED_FUNCTION_LAN;
+			gpios = <&gpio3 8 GPIO_ACTIVE_LOW>;
+			default-state = "off";
+		};
+
+		led_lan2: led-lan2 {
+			label = "dir-x3060z:green:lan2";
+			color = <LED_COLOR_ID_GREEN>;
+			function = LED_FUNCTION_LAN;
+			gpios = <&gpio3 9 GPIO_ACTIVE_LOW>;
+			default-state = "off";
+		};
+
+		led_lan3: led-lan3 {
+			label = "dir-x3060z:green:lan3";
+			color = <LED_COLOR_ID_GREEN>;
+			function = LED_FUNCTION_LAN;
+			gpios = <&gpio3 10 GPIO_ACTIVE_LOW>;
+			default-state = "off";
+		};
+
+		led_wan_port: led-wan-port {
+			label = "dir-x3060z:green:wan";
+			color = <LED_COLOR_ID_GREEN>;
+			function = LED_FUNCTION_WAN;
+			gpios = <&gpio3 11 GPIO_ACTIVE_LOW>;
+			default-state = "off";
+		};
+	};
+
+	keys {
+		/*
+		 * Polled mode is mandatory on ZX279128S/R: IRQ mode on the ZTE GPIO
+		 * controller triggers an RCU lockup on button press.
+		 * Input pins from vmlinux @ 0xc05ba690 (Board ID 0x47):
+		 *   - Flat GPIO  0 (&gpio0  0): Input 1 (Reset)
+		 *   - Flat GPIO 62 (&gpio3 14): Input 2 (WPS / Mesh)
+		 *   - Flat GPIO  5 (&gpio0  5): Candidate Input on sibling 0x48/0x4a
+		 */
+		compatible = "gpio-keys-polled";
+		poll-interval = <50>;
+
+		key-reset {
+			label = "reset";
+			gpios = <&gpio0 0 GPIO_ACTIVE_LOW>;
+			linux,code = <KEY_RESTART>;
+			debounce-interval = <60>;
+		};
+
+		key-wps {
+			label = "wps";
+			gpios = <&gpio3 14 GPIO_ACTIVE_LOW>;
+			linux,code = <KEY_WPS_BUTTON>;
+			debounce-interval = <60>;
+		};
+	};
+};
+
+/*
+ * 4x integrated Gigabit PHYs confirmed from stock vmlinux uni_phy @ 0xc05d1a90
+ * ({0x0d, 0x0a, 0x0b, 0x0c}) and /proc/interrupts (gephy0..gephy3 on GIC 71..74).
+ * Factory MAC addresses live inside the JFFS2 file /tagparam/paramtag (mtd "tagparam"
+ * at flash offset 0x04c00000, file offset +0x36 = c8:78:7d:xx:xx:04 .. +0x66 = d6:08)
+ * and are applied by /etc/board.d/02_network.
+ */
+&gmac {
+	status = "okay";
+};
+
+&gmac_port0 {
+	label = "wan";
+	phy-handle = <&phy10>;
+	phy-mode = "internal";
+	status = "okay";
+};
+
+&gmac_port1 {
+	label = "lan1";
+	phy-handle = <&phy11>;
+	phy-mode = "internal";
+	status = "okay";
+};
+
+&gmac_port2 {
+	label = "lan2";
+	phy-handle = <&phy12>;
+	phy-mode = "internal";
+	status = "okay";
+};
+
+&gmac_port3 {
+	label = "lan3";
+	phy-handle = <&phy13>;
+	phy-mode = "internal";
+	status = "okay";
+};
+
+&gmac_port4 {
+	status = "disabled";
+};
+
+&serial0 {
+	status = "okay";
+};
+
+&serial1 {
+	status = "okay";
+};
+
+&mdio {
+	status = "okay";
+
+	phy10: ethernet-phy@a {
+		reg = <10>;
+	};
+
+	phy11: ethernet-phy@b {
+		reg = <11>;
+	};
+
+	phy12: ethernet-phy@c {
+		reg = <12>;
+	};
+
+	phy13: ethernet-phy@d {
+		reg = <13>;
+	};
+};
+
+/*
+ * MediaTek Filogic 630 (MT7916AN + MT7976DN/DM) dual-band Wi-Fi 6:
+ *   PCIe0 (0000:00:00.0, 14c3:7906, mem 0x10000000, GIC 95) — reset GPIO 52 (&gpio3 4)
+ *   PCIe1 (0000:01:00.0, 14c3:790a, mem 0x20000000, GIC 110) — reset GPIO 54 (&gpio3 6)
+ * Calibration data is stored in mtd "wlan" (0x05400000) as /wlan/MT7916_EEPROM.bin.
+ */
+&pcie0 {
+	reset-gpios = <&gpio3 4 GPIO_ACTIVE_LOW>;
+	enable-gpios = <&gpio3 7 GPIO_ACTIVE_HIGH>;
+	phys = <&crm1_pcie0_phy>;
+	phy-names = "pcie";
+	status = "okay";
+};
+
+&pcie1 {
+	reset-gpios = <&gpio3 6 GPIO_ACTIVE_LOW>;
+	phys = <&crm1_pcie1_phy>;
+	phy-names = "pcie";
+	status = "okay";
+};
+
+/ {
+	soc {
+		crm1: syscon@94000000 {
+			compatible = "syscon", "simple-mfd";
+			reg = <0x94000000 0x1000>;
+			#address-cells = <1>;
+			#size-cells = <0>;
+
+			reboot {
+				compatible = "syscon-reboot";
+				offset = <0x44>;
+				mask = <0x1>;
+				value = <0x1>;
+			};
+
+			crm1_pcie0_phy: phy@0 {
+				compatible = "zte,zx279128s-pcie-phy";
+				reg = <0>;
+				#phy-cells = <0>;
+			};
+
+			crm1_pcie1_phy: phy@1 {
+				compatible = "zte,zx279128s-pcie-phy";
+				reg = <1>;
+				#phy-cells = <0>;
+			};
+		};
+	};
+};
+
+/* No USB port is populated on the DIR-X3060Z PCB. */
+&usb {
+	status = "disabled";
+};
+
+&spifc {
+	status = "okay";
+
+	flash@0 {
+		compatible = "spi-nand";
+		reg = <0>;
+		spi-max-frequency = <50000000>;
+		spi-rx-bus-width = <2>;
+		spi-tx-bus-width = <1>;
+
+		/*
+		 * ESMT F50L1G41LB (128 MiB, 2 KiB page, 128 KiB erase block).
+		 *
+		 * Exact hardware partition table extracted from stock vmlinux.bin @ 0xc042d918:
+		 *   0x00000000 .. 0x00200000 ( 2 MiB): u-boot          (stock mtd1)
+		 *   0x00200000 .. 0x00700000 ( 5 MiB): kernel0         (stock mtd3, Slot 0 kernel)
+		 *   0x00700000 .. 0x00c00000 ( 5 MiB): kernel1         (stock mtd4, Slot 1 kernel)
+		 *   0x00c00000 .. 0x02c00000 (32 MiB): rootfs0         (stock mtd5, Slot 0 rootfs)
+		 *   0x02c00000 .. 0x04c00000 (32 MiB): rootfs1         (stock mtd6, Slot 1 rootfs)
+		 *   0x04c00000 .. 0x04e00000 ( 2 MiB): parameter_tags  (stock mtd2, /tagparam JFFS2)
+		 *   0x04e00000 .. 0x05300000 ( 5 MiB): usercfg         (stock mtd7, /userconfig JFFS2)
+		 *   0x05300000 .. 0x05400000 ( 1 MiB): others          (stock mtd8, BootImageNum selector)
+		 *   0x05400000 .. 0x05700000 ( 3 MiB): wlan            (stock mtd9, /wlan JFFS2 caldata)
+		 *   0x05700000 .. 0x05800000 ( 1 MiB): middleware      (stock mtd10)
+		 *   0x05800000 .. 0x06000000 ( 8 MiB): framework       (stock mtd11)
+		 *   0x06000000 .. 0x06800000 ( 8 MiB): framework1      (stock mtd12)
+		 *   0x06800000 .. 0x07800000 (16 MiB): apps            (stock mtd13, UBIFS)
+		 *   0x07800000 .. 0x08000000 ( 8 MiB): BBT / reserved
+		 *
+		 * OpenWrt is installed in Slot 0 (kernel @ 0x00200000 + rootfs @ 0x00c00000),
+		 * preserving the active stock firmware in Slot 1 (kernel1 @ 0x00700000 +
+		 * rootfs1 @ 0x02c00000) untouched for dual-slot rollback via "others".
+		 * Unlike the E2631, U-Boot CTCRV1.0.0 only checks the 0x1E0 header CRC and
+		 * kernel CRC at boot time (never rootfs CRC), so OpenWrt's standard squashfs +
+		 * rootfs_data JFFS2 split operates across the full 32 MiB Slot 0 rootfs partition.
+		 */
+		partitions {
+			compatible = "fixed-partitions";
+			#address-cells = <1>;
+			#size-cells = <1>;
+
+			partition@0 {
+				label = "u-boot";
+				reg = <0x00000000 0x00200000>;
+				read-only;
+			};
+
+			partition@200000 {
+				label = "kernel";
+				reg = <0x00200000 0x00500000>;
+			};
+
+			partition@700000 {
+				label = "kernel1";
+				reg = <0x00700000 0x00500000>;
+				read-only;
+			};
+
+			partition@c00000 {
+				label = "rootfs";
+				reg = <0x00c00000 0x02000000>;
+			};
+
+			partition@2c00000 {
+				label = "rootfs1";
+				reg = <0x02c00000 0x02000000>;
+				read-only;
+			};
+
+			partition@4c00000 {
+				/* JFFS2 mounted by vendor at /tagparam; holds paramtag (MACs) */
+				label = "tagparam";
+				reg = <0x04c00000 0x00200000>;
+			};
+
+			partition@4e00000 {
+				label = "usercfg";
+				reg = <0x04e00000 0x00500000>;
+				read-only;
+			};
+
+			partition@5300000 {
+				/* Holds FrwPartion=0x...,BootImageNum=0x... dual-slot selector */
+				label = "others";
+				reg = <0x05300000 0x00100000>;
+			};
+
+			partition@5400000 {
+				/* JFFS2 mounted by vendor at /wlan; holds MT7916_EEPROM.bin */
+				label = "wlan";
+				reg = <0x05400000 0x00300000>;
+			};
+
+			partition@5700000 {
+				label = "middleware";
+				reg = <0x05700000 0x00100000>;
+				read-only;
+			};
+
+			partition@5800000 {
+				label = "framework";
+				reg = <0x05800000 0x00800000>;
+				read-only;
+			};
+
+			partition@6000000 {
+				label = "framework1";
+				reg = <0x06000000 0x00800000>;
+				read-only;
+			};
+
+			partition@6800000 {
+				label = "apps";
+				reg = <0x06800000 0x01000000>;
+			};
+		};
+	};
+};
+
+&l2cc {
+	zte,l2c-io-read-lock;
+};

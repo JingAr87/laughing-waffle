@@ -1,0 +1,5 @@
+#!/bin/sh
+# Enable packet steering across both Cortex-A9 cores on first boot.
+uci -q set network.globals.packet_steering='1'
+uci commit network
+exit 0

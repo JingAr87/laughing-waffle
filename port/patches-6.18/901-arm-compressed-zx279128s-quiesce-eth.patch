@@ -1,0 +1,53 @@
+From: OpenWrt DIR-X1860Z port
+Subject: [PATCH] ARM: compressed: quiesce ZX279128S U-Boot eth switch/DMA before decompression
+
+--- a/arch/arm/boot/compressed/misc.c
++++ b/arch/arm/boot/compressed/misc.c
+@@ -128,6 +128,36 @@
+ 	error("Attempting division by 0!");
+ }
+ 
++#ifdef CONFIG_SOC_ZX279128S
++static void zx279128s_quiesce_eth(void)
++{
++	volatile unsigned int *dma = (volatile unsigned int *)0x92350000;
++	volatile unsigned int *bmu = (volatile unsigned int *)0x92348000;
++	volatile unsigned int *pp  = (volatile unsigned int *)0x92380000;
++	volatile unsigned int *glb = (volatile unsigned int *)0x92000008;
++	unsigned int dma_val = *dma;
++	unsigned int bmu_val = *bmu;
++	unsigned int i;
++
++	if ((dma_val & (0xfU << 16)) || (bmu_val & 1U)) {
++		for (i = 0; i < 5; i++) {
++			volatile unsigned int *mac =
++				(volatile unsigned int *)(0x92200000U + i * 0x40000U);
++			*mac &= ~3U;
++			(void)*mac;
++		}
++		*dma = (dma_val & ~(0xfU << 16)) | (1U << 21);
++		(void)*dma;
++		*bmu = 0;
++		(void)*bmu;
++		*pp = 2;
++		(void)*pp;
++		*glb = 0;
++		(void)*glb;
++	}
++}
++#endif
++
+ void
+ decompress_kernel(unsigned long output_start, unsigned long free_mem_ptr_p,
+ 		unsigned long free_mem_ptr_end_p,
+@@ -145,6 +175,10 @@
+ #endif
+ 	arch_decomp_setup();
+ 
++#ifdef CONFIG_SOC_ZX279128S
++	zx279128s_quiesce_eth();
++#endif
++
+ 	putstr("Uncompressing Linux...");
+ 	ret = do_decompress(input_data, input_data_end - input_data,
+ 			    output_data, error);

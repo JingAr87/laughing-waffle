@@ -1,0 +1,371 @@
+// SPDX-License-Identifier: GPL-2.0-only OR BSD-2-Clause
+/*
+ * D-Link DIR-X1860Z (HW V1.0, TM / Unifi Malaysia AX1800 Wi-Fi 6 Router)
+ * SoC       : Sanechips / ZTE ZX279128R (cputype=3, 128s family, dual Cortex-A9 @ 1 GHz, no VFP/NEON)
+ * RAM       : 256 MiB DDR3
+ * Flash     : 128 MiB 3.3V SPI-NAND (2 KiB page, 128 KiB eraseblock)
+ * Wi-Fi     : MediaTek MT7905DAN + MT7975DN (MT7915 family, chip ID 0x7915, PCIe0 + PCIe1)
+ * Ethernet  : 1x GbE WAN + 3x GbE LAN (4x integrated Sanechips GbE PHYs at MDIO 0xa..0xd)
+ * Bootloader: U-Boot CTCRV1.0.7 (20220414131149, non-secure, 0x1E0 slot header + legacy uImage)
+ *
+ * All memory addresses, MTD partition offsets (from vmlinux 0xc0458638), MDIO PHY addresses
+ * (from vmlinux uni_phy @ 0xc060b6e4 = {0x0d, 0x0a, 0x0b, 0x0c}), and GPIO tables
+ * (from vmlinux 0xc05f42bc / 0xc05f48bc, Board ID 0x46 F628R / 0x47 F428S) were verified
+ * directly from a full 128 MiB flash dump of a live unit.
+ */
+
+/dts-v1/;
+
+#include "zte/zx279128s.dtsi"
+#include <dt-bindings/gpio/gpio.h>
+#include <dt-bindings/input/input.h>
+#include <dt-bindings/leds/common.h>
+
+/ {
+	model = "D-Link DIR-X1860Z";
+	compatible = "dlink,dir-x1860z", "dlink,dir-x3060z", "zte,zx279128r", "zte,zx279128s";
+
+	aliases {
+		ethernet0 = &gmac;
+		serial0 = &serial0;
+		serial1 = &serial1;
+		led-boot = &led_power;
+		led-failsafe = &led_power;
+		led-running = &led_power;
+		led-upgrade = &led_internet;
+	};
+
+	chosen {
+		stdout-path = "serial0:115200n8";
+	};
+
+	memory@40000000 {
+		device_type = "memory";
+		reg = <0x40000000 0x10000000>; /* 256 MiB DDR3 */
+	};
+
+	leds {
+		compatible = "gpio-leds";
+
+		/*
+		 * GPIO table verified from stock vmlinux.bin @ 0xc05f42bc (Board ID 0x46 F628R /
+		 * 0x47 F428S) + bspdriver.ko (hw_led_wlan_mtk -> slot 61) + live hardware testing:
+		 *   - Flat GPIO  6 (&gpio0  6): Output / Power LED (ACTIVE_HIGH, slot 53)
+		 *   - Flat GPIO 17 (&gpio1  1): Output / IE / Internet LED (ACTIVE_HIGH, slot 4)
+		 *   - Flat GPIO 53 (&gpio3  5): Output / Wi-Fi LED (ACTIVE_HIGH, slot 61)
+		 *   - Flat GPIO 56..59 (&gpio3 8..11): Hardware-driven GbE LAN1..3 / WAN PHY LEDs
+		 */
+		led_power: led-power {
+			label = "dir-x1860z:green:power";
+			color = <LED_COLOR_ID_GREEN>;
+			function = LED_FUNCTION_POWER;
+			gpios = <&gpio0 6 GPIO_ACTIVE_HIGH>;
+			default-state = "on";
+		};
+
+		led_internet: led-internet {
+			label = "dir-x1860z:green:internet";
+			color = <LED_COLOR_ID_GREEN>;
+			function = LED_FUNCTION_WAN_ONLINE;
+			gpios = <&gpio1 1 GPIO_ACTIVE_HIGH>;
+			default-state = "off";
+		};
+
+		led_wlan: led-wlan {
+			label = "dir-x1860z:green:wlan";
+			color = <LED_COLOR_ID_GREEN>;
+			function = LED_FUNCTION_WLAN;
+			gpios = <&gpio3 5 GPIO_ACTIVE_HIGH>;
+			default-state = "off";
+		};
+
+		led_lan1: led-lan1 {
+			label = "dir-x1860z:green:lan1";
+			color = <LED_COLOR_ID_GREEN>;
+			function = LED_FUNCTION_LAN;
+			gpios = <&gpio3 8 GPIO_ACTIVE_LOW>;
+			default-state = "off";
+		};
+
+		led_lan2: led-lan2 {
+			label = "dir-x1860z:green:lan2";
+			color = <LED_COLOR_ID_GREEN>;
+			function = LED_FUNCTION_LAN;
+			gpios = <&gpio3 9 GPIO_ACTIVE_LOW>;
+			default-state = "off";
+		};
+
+		led_lan3: led-lan3 {
+			label = "dir-x1860z:green:lan3";
+			color = <LED_COLOR_ID_GREEN>;
+			function = LED_FUNCTION_LAN;
+			gpios = <&gpio3 10 GPIO_ACTIVE_LOW>;
+			default-state = "off";
+		};
+
+		led_wan_port: led-wan-port {
+			label = "dir-x1860z:green:wan";
+			color = <LED_COLOR_ID_GREEN>;
+			function = LED_FUNCTION_WAN;
+			gpios = <&gpio3 11 GPIO_ACTIVE_LOW>;
+			default-state = "off";
+		};
+	};
+
+	keys {
+		/*
+		 * Input pins from vmlinux @ 0xc05f42bc (Board ID 0x46/0x47):
+		 *   - Flat GPIO  0 (&gpio0  0): Input 1 (Reset)
+		 *   - Flat GPIO 62 (&gpio3 14): Input 2 (WPS / Mesh)
+		 */
+		compatible = "gpio-keys-polled";
+		poll-interval = <50>;
+
+		key-reset {
+			label = "reset";
+			gpios = <&gpio0 0 GPIO_ACTIVE_LOW>;
+			linux,code = <KEY_RESTART>;
+			debounce-interval = <60>;
+		};
+
+		key-wps {
+			label = "wps";
+			gpios = <&gpio3 14 GPIO_ACTIVE_LOW>;
+			linux,code = <KEY_WPS_BUTTON>;
+			debounce-interval = <60>;
+		};
+	};
+};
+
+&gmac {
+	status = "okay";
+};
+
+&gmac_port0 {
+	label = "wan";
+	phy-handle = <&phy10>;
+	phy-mode = "internal";
+	status = "okay";
+};
+
+&gmac_port1 {
+	label = "lan1";
+	phy-handle = <&phy11>;
+	phy-mode = "internal";
+	status = "okay";
+};
+
+&gmac_port2 {
+	label = "lan2";
+	phy-handle = <&phy12>;
+	phy-mode = "internal";
+	status = "okay";
+};
+
+&gmac_port3 {
+	label = "lan3";
+	phy-handle = <&phy13>;
+	phy-mode = "internal";
+	status = "okay";
+};
+
+&gmac_port4 {
+	status = "disabled";
+};
+
+&serial0 {
+	status = "okay";
+};
+
+&serial1 {
+	status = "okay";
+};
+
+&mdio {
+	status = "okay";
+
+	phy10: ethernet-phy@a {
+		reg = <10>;
+	};
+
+	phy11: ethernet-phy@b {
+		reg = <11>;
+	};
+
+	phy12: ethernet-phy@c {
+		reg = <12>;
+	};
+
+	phy13: ethernet-phy@d {
+		reg = <13>;
+	};
+};
+
+/*
+ * MediaTek MT7905DAN + MT7975DN (AX1800 Wi-Fi 6, chip ID 0x7915):
+ *   PCIe0 (0000:00:00.0, mem 0x10000000, GIC 95) — reset GPIO 52 (&gpio3 4)
+ *   PCIe1 (0000:01:00.0, mem 0x20000000, GIC 110) — reset GPIO 54 (&gpio3 6)
+ * Calibration data is stored in mtd "wlan" (0x01500000) as /wlan/MT7915_EEPROM.bin (3,778 B).
+ */
+&pcie0 {
+	reset-gpios = <&gpio3 4 GPIO_ACTIVE_LOW>;
+	enable-gpios = <&gpio3 7 GPIO_ACTIVE_HIGH>;
+	phys = <&crm1_pcie0_phy>;
+	phy-names = "pcie";
+	status = "okay";
+};
+
+&pcie1 {
+	reset-gpios = <&gpio3 6 GPIO_ACTIVE_LOW>;
+	phys = <&crm1_pcie1_phy>;
+	phy-names = "pcie";
+	status = "okay";
+};
+
+/ {
+	soc {
+		crm1: syscon@94000000 {
+			compatible = "syscon", "simple-mfd";
+			reg = <0x94000000 0x1000>;
+			#address-cells = <1>;
+			#size-cells = <0>;
+
+			reboot {
+				compatible = "syscon-reboot";
+				offset = <0x44>;
+				mask = <0x1>;
+				value = <0x1>;
+			};
+
+			crm1_pcie0_phy: phy@0 {
+				compatible = "zte,zx279128s-pcie-phy";
+				reg = <0>;
+				#phy-cells = <0>;
+			};
+
+			crm1_pcie1_phy: phy@1 {
+				compatible = "zte,zx279128s-pcie-phy";
+				reg = <1>;
+				#phy-cells = <0>;
+			};
+		};
+	};
+};
+
+&usb {
+	status = "disabled";
+};
+
+&spifc {
+	status = "okay";
+
+	flash@0 {
+		compatible = "spi-nand";
+		reg = <0>;
+		spi-max-frequency = <50000000>;
+		spi-rx-bus-width = <2>;
+		spi-tx-bus-width = <1>;
+
+		/*
+		 * Exact DIR-X1860Z hardware partition table from stock vmlinux.bin @ 0xc0458638:
+		 *   0x00000000 .. 0x00200000 ( 2 MiB): u-boot          (stock mtd1)
+		 *   0x00200000 .. 0x00700000 ( 5 MiB): kernel0         (stock mtd3, Slot 0 stock kernel)
+		 *   0x00700000 .. 0x00c00000 ( 5 MiB): kernel1         (stock mtd4, Slot 1 OpenWrt kernel)
+		 *   0x00c00000 .. 0x01400000 ( 8 MiB): usercfg         (stock mtd5, /userconfig JFFS2)
+		 *   0x01400000 .. 0x01500000 ( 1 MiB): others          (stock mtd6, BootImageNum selector)
+		 *   0x01500000 .. 0x01800000 ( 3 MiB): wlan            (stock mtd7, /wlan MT7915_EEPROM.bin)
+		 *   0x01800000 .. 0x03800000 (32 MiB): rootfs0         (stock mtd8, Slot 0 stock rootfs)
+		 *   0x03800000 .. 0x05800000 (32 MiB): rootfs1         (stock mtd9, Slot 1 OpenWrt rootfs)
+		 *   0x05800000 .. 0x06000000 ( 8 MiB): framework       (stock mtd10)
+		 *   0x06000000 .. 0x06800000 ( 8 MiB): framework1      (stock mtd11)
+		 *   0x06800000 .. 0x06b00000 ( 3 MiB): parameter_tags  (stock mtd2, /tagparam JFFS2)
+		 *   0x06b00000 .. 0x08000000 (21 MiB): apps            (stock mtd12, UBIFS)
+		 *
+		 * Because the stock DIR-X1860Z boots from Slot 0 (kernel0 @ 0x00200000 + rootfs0
+		 * @ 0x01800000), upgrading via Web UI / fw_flashing installs OpenWrt into Slot 1
+		 * (kernel1 @ 0x00700000 + rootfs1 @ 0x03800000), preserving Stock Slot 0 untouched
+		 * and read-only for instant rollback via "others".
+		 *
+		 * u-boot, kernel (Slot 1), kernel0 (Slot 0), and rootfs (Slot 1 @ 0x03800000) are
+		 * placed as the first four nodes so "rootfs" is /dev/mtdblock3 on BOTH routers.
+		 */
+		partitions {
+			compatible = "fixed-partitions";
+			#address-cells = <1>;
+			#size-cells = <1>;
+
+			partition@0 {
+				label = "u-boot";
+				reg = <0x00000000 0x00200000>;
+				read-only;
+			};
+
+			partition@700000 {
+				label = "kernel";
+				reg = <0x00700000 0x00500000>;
+			};
+
+			partition@200000 {
+				label = "kernel0";
+				reg = <0x00200000 0x00500000>;
+				read-only;
+			};
+
+			partition@3800000 {
+				label = "rootfs";
+				reg = <0x03800000 0x02000000>;
+			};
+
+			partition@1800000 {
+				label = "rootfs0";
+				reg = <0x01800000 0x02000000>;
+				read-only;
+			};
+
+			partition@c00000 {
+				label = "usercfg";
+				reg = <0x00c00000 0x00800000>;
+				read-only;
+			};
+
+			partition@1400000 {
+				/* Holds BootImageNum dual-slot selector */
+				label = "others";
+				reg = <0x01400000 0x00100000>;
+			};
+
+			partition@1500000 {
+				/* JFFS2 mounted by vendor at /wlan; holds MT7915_EEPROM.bin */
+				label = "wlan";
+				reg = <0x01500000 0x00300000>;
+			};
+
+			partition@5800000 {
+				label = "framework";
+				reg = <0x05800000 0x00800000>;
+				read-only;
+			};
+
+			partition@6000000 {
+				label = "framework1";
+				reg = <0x06000000 0x00800000>;
+				read-only;
+			};
+
+			partition@6800000 {
+				/* JFFS2 mounted by vendor at /tagparam; holds paramtag (MACs) */
+				label = "tagparam";
+				reg = <0x06800000 0x00300000>;
+			};
+
+			partition@6b00000 {
+				label = "apps";
+				reg = <0x06b00000 0x01500000>;
+			};
+		};
+	};
+};
+
+&l2cc {
+	zte,l2c-io-read-lock;
+};

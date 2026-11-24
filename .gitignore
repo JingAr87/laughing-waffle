@@ -1,0 +1,27 @@
+# Large 128 MiB SPI-NAND flash backups, vendor binaries & personal router configs
+backup/
+backup_*/
+
+# Third-party reference repositories (downloaded separately)
+repos/
+
+# Temporary audit/recon scripts and scraped router web pages
+audit/
+
+# OpenWrt build tree (if cloned inside this workspace)
+openwrt/
+
+# Build & binary artifacts
+out/
+*.bin
+*.uImage
+*.img
+*.dtb
+*.tar.gz
+*.zip
+
+# Python & OS files
+__pycache__/
+*.py[cod]
+.DS_Store
+Thumbs.db

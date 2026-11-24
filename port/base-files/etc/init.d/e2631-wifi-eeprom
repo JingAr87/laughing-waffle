@@ -1,0 +1,33 @@
+#!/bin/sh /etc/rc.common
+# Stage the MT7916 or MT7915/MT7905 calibration at boot based on whichever
+# MediaTek radio is present on the PCIe bus (14c3:7906 -> MT7916, 14c3:7915 -> MT7915/MT7905).
+START=05
+
+start() {
+	local has_7915=0 has_7906=0 d devid fw
+
+	for d in /sys/bus/pci/devices/*; do
+		devid=$(cat "$d/device" 2>/dev/null)
+		case "$devid" in
+		0x7915) has_7915=1 ;;
+		0x7906) has_7906=1 ;;
+		esac
+	done
+
+	if [ "$has_7915" = 1 ]; then
+		for fw in mediatek/mt7915_eeprom.bin mediatek/mt7915_eeprom_dbdc.bin; do
+			if [ ! -e "/lib/firmware/$fw" ]; then
+				FIRMWARE=$fw /etc/hotplug.d/firmware/11-mt76-caldata
+				echo "wifi-eeprom: staged $fw=$([ -e "/lib/firmware/$fw" ] && echo yes || echo no)" > /dev/kmsg
+			fi
+		done
+	fi
+
+	if [ "$has_7906" = 1 ] || [ "$has_7915" = 0 ]; then
+		fw=mediatek/mt7916_eeprom.bin
+		if [ ! -e "/lib/firmware/$fw" ]; then
+			FIRMWARE=$fw /etc/hotplug.d/firmware/11-mt76-caldata
+			echo "wifi-eeprom: staged $fw=$([ -e "/lib/firmware/$fw" ] && echo yes || echo no)" > /dev/kmsg
+		fi
+	fi
+}

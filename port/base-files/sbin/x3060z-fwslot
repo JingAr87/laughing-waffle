@@ -1,0 +1,81 @@
+#!/bin/sh
+# Dual-slot status & boot-slot switcher for the D-Link DIR-X3060Z.
+#
+# U-Boot CTCRV1.0.0 selects the active kernel/rootfs slot from the "others"
+# partition (flash offset 0x05300000), which starts with an ASCII key=value
+# string terminated by 0xFF padding:
+#   FrwPartion=0x00000001,Image1Status=0xffffffff,BootImageNum=0x00000001,
+#
+#   BootImageNum=0x00000000 -> Boots Slot 0 (kernel @ 0x00200000 + rootfs @ 0x00c00000) [OpenWrt]
+#   BootImageNum=0x00000001 -> Boots Slot 1 (kernel1 @ 0x00700000 + rootfs1 @ 0x02c00000) [Stock]
+
+. /lib/functions.sh
+
+find_mtd_chr() {
+	local idx=$(find_mtd_index "$1")
+	[ -n "$idx" ] && echo "/dev/mtd$idx"
+}
+
+show_slot_hdr() {
+	local label="$1" part ver banner
+	part=$(find_mtd_part "$label")
+	if [ -z "$part" ] || [ ! -e "$part" ]; then
+		echo "  $label: <not found>"
+		return
+	fi
+	ver=$(dd if="$part" bs=1 skip=36 count=32 2>/dev/null | tr -d '\000')
+	banner=$(dd if="$part" bs=1 skip=144 count=52 2>/dev/null | tr -d '\000')
+	echo "  $label ($part): version='$ver' banner='$banner'"
+}
+
+cmd="${1:-status}"
+
+case "$cmd" in
+status)
+	others_part=$(find_mtd_part others)
+	[ -n "$others_part" ] || { echo "ERROR: 'others' partition not found" >&2; exit 1; }
+	selector=$(dd if="$others_part" bs=128 count=1 2>/dev/null | tr -d '\000\377')
+	echo "U-Boot slot selector (others): $selector"
+	show_slot_hdr "kernel"
+	[ -n "$(find_mtd_part kernel0)" ] && show_slot_hdr "kernel0"
+	[ -n "$(find_mtd_part kernel1)" ] && show_slot_hdr "kernel1"
+	;;
+switch)
+	target="$2"
+	board=$(cat /tmp/sysinfo/board_name 2>/dev/null)
+	case "$board:$target" in
+	dlink,dir-x1860z:0|dlink,dir-x1860z:slot0|dlink,dir-x1860z:stock)
+		new_str="FrwPartion=0x00000000,Image0Status=0xffffffff,BootImageNum=0x00000000,"
+		desc="Slot 0 (Stock firmware: kernel0 @ 0x00200000 + rootfs0 @ 0x01800000)"
+		;;
+	dlink,dir-x1860z:1|dlink,dir-x1860z:slot1|dlink,dir-x1860z:openwrt)
+		new_str="FrwPartion=0x00000001,Image1Status=0xffffffff,BootImageNum=0x00000001,"
+		desc="Slot 1 (OpenWrt: kernel @ 0x00700000 + rootfs @ 0x03800000)"
+		;;
+	*:0|*:slot0|*:openwrt)
+		new_str="FrwPartion=0x00000000,Image0Status=0xffffffff,BootImageNum=0x00000000,"
+		desc="Slot 0 (OpenWrt: kernel @ 0x00200000 + rootfs @ 0x00c00000)"
+		;;
+	*:1|*:slot1|*:stock)
+		new_str="FrwPartion=0x00000001,Image1Status=0xffffffff,BootImageNum=0x00000001,"
+		desc="Slot 1 (Stock firmware: kernel1 @ 0x00700000 + rootfs1 @ 0x02c00000)"
+		;;
+	*)
+		echo "Usage: $0 [status | switch <0|1|openwrt|stock>]" >&2
+		exit 1
+		;;
+	esac
+	others_chr=$(find_mtd_chr others)
+	[ -n "$others_chr" ] || { echo "ERROR: 'others' character MTD device not found" >&2; exit 1; }
+	tmp=/tmp/others_slot.bin
+	printf "%s" "$new_str" > "$tmp"
+	mtd write "$tmp" others
+	rm -f "$tmp"
+	echo "Active boot slot switched to $desc."
+	echo "Run 'reboot' to boot into the selected slot."
+	;;
+*)
+	echo "Usage: $0 [status | switch <0|1|openwrt|stock>]" >&2
+	exit 1
+	;;
+esac

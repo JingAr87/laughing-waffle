@@ -1,0 +1,46 @@
+From: OpenWrt DIR-X1860Z port
+Subject: [PATCH] serial: amba-pl011: support ZTE zx29 register offsets in earlycon
+
+ZTE/Sanechips ZX279128S/R UARTs use custom register offsets (ZX_UART011_DR=0x04,
+ZX_UART011_FR=0x14, ZX_UART01x_FR_BUSY=BIT(8)) instead of standard ARM PL011
+offsets (0x00 / 0x18). Polling standard offset 0x18 in pl011_putc() produces no
+earlycon output and can hang early boot if bits 3 or 5 at 0x18 are set.
+--- a/drivers/tty/serial/amba-pl011.c
++++ b/drivers/tty/serial/amba-pl011.c
+@@ -2693,6 +2693,23 @@ static void pl011_putc(struct uart_port *port, unsigned char c)
+ 		cpu_relax();
+ }
+ 
++static void pl011_zte_putc(struct uart_port *port, unsigned char c)
++{
++	while (readl(port->membase + ZX_UART011_FR) & UART01x_FR_TXFF)
++		cpu_relax();
++	writel(c, port->membase + ZX_UART011_DR);
++	while (readl(port->membase + ZX_UART011_FR) & ZX_UART01x_FR_BUSY)
++		cpu_relax();
++}
++
++static void pl011_zte_early_write(struct console *con, const char *s,
++				  unsigned int n)
++{
++	struct earlycon_device *dev = con->data;
++
++	uart_console_write(&dev->port, s, n, pl011_zte_putc);
++}
++
+ static void pl011_early_write(struct console *con, const char *s, unsigned int n)
+ {
+ 	struct earlycon_device *dev = con->data;
+@@ -2758,7 +2775,11 @@ static int __init pl011_early_console_setup(struct earlycon_device *device,
+ 	if (!device->port.membase)
+ 		return -ENODEV;
+ 
+-	device->con->write = pl011_early_write;
++	if (IS_ENABLED(CONFIG_SOC_ZX279128S))
++		device->con->write = pl011_zte_early_write;
++	else
++		device->con->write = pl011_early_write;
++
+ 	device->con->read = pl011_early_read;
+ 
+ 	return 0;

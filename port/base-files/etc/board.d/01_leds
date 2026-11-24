@@ -1,0 +1,20 @@
+. /lib/functions/uci-defaults.sh
+
+board_config_update
+
+board=$(board_name)
+
+case "$board" in
+dlink,dir-x1860z)
+	ucidef_set_led_netdev "internet" "Internet" "dir-x1860z:green:internet" "wan" "link tx rx"
+	ucidef_set_led_netdev "wlan" "Wi-Fi" "dir-x1860z:green:wlan" "phy0-ap0" "link tx rx"
+	;;
+dlink,dir-x3060z)
+	ucidef_set_led_netdev "internet" "Internet" "dir-x3060z:green:internet" "wan" "link tx rx"
+	ucidef_set_led_netdev "wlan" "Wi-Fi" "dir-x3060z:green:wlan" "phy0-ap0" "link tx rx"
+	;;
+esac
+
+board_config_flush
+
+exit 0

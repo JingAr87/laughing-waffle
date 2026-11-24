@@ -1,0 +1,54 @@
+#!/bin/sh
+# Bring up either MT7916 (14c3:7906) or MT7905/MT7915 (14c3:7915) outside
+# the boot-critical path, binding only the primary PCIe function while
+# drivers_autoprobe is off so the secondary ext-HIF (0x790a or 0x7916) is
+# claimed as hif2 by the primary instance rather than probed in parallel.
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+DEFER=${1:-25}
+log() { echo "wifi-on: $*" > /dev/kmsg; }
+
+log "waiting ${DEFER}s after boot before touching the card"
+sleep "$DEFER"
+
+for d in /sys/bus/pci/devices/*; do
+	case "$(cat "$d/device" 2>/dev/null)" in
+	0x7915)
+		for fw in mediatek/mt7915_eeprom.bin mediatek/mt7915_eeprom_dbdc.bin; do
+			[ -e "/lib/firmware/$fw" ] || FIRMWARE=$fw /etc/hotplug.d/firmware/11-mt76-caldata
+		done
+		;;
+	0x7906)
+		fw=mediatek/mt7916_eeprom.bin
+		[ -e "/lib/firmware/$fw" ] || FIRMWARE=$fw /etc/hotplug.d/firmware/11-mt76-caldata
+		;;
+	esac
+done
+
+echo 0 > /sys/bus/pci/drivers_autoprobe
+modprobe mt7915e || log "modprobe failed rc=$?"
+
+# Bind primary PCIe function (0x7906 for MT7916AN, 0x7915 for MT7905DAN/MT7915)
+for d in /sys/bus/pci/devices/*; do
+	devid="$(cat "$d/device" 2>/dev/null)"
+	[ "$devid" = "0x7906" ] || [ "$devid" = "0x7915" ] || continue
+	[ -e "$d/driver" ] && continue
+	log "binding ${d##*/} ($devid)"
+	echo "${d##*/}" > /sys/bus/pci/drivers/mt7915e/bind
+done
+
+echo 1 > /sys/bus/pci/drivers_autoprobe
+log "done binding mt7915e"
+
+# On MT7905DAN (0x7915) + ZX279128R, the initial mt7915e probe leaves WFDMA0 RX
+# (queue 0 / queue 3) stalled until a single L0 full recovery (sys_recovery=7)
+# re-initializes the RX DMA rings for both 2.4 GHz and 5 GHz bands.
+if [ -w /sys/kernel/debug/ieee80211/phy0/mt76/sys_recovery ] && grep -qs 0x7915 /sys/bus/pci/devices/*/device; then
+	log "triggering L0 full recovery (sys_recovery=7) to wake MT7905 WFDMA0 RX"
+	sleep 1
+	echo 7 > /sys/kernel/debug/ieee80211/phy0/mt76/sys_recovery
+	sleep 8
+fi
+
+# Reload fw4 after netifd creates phy0-ap0/phy1-ap0 so both Wi-Fi interfaces
+# are added to the nftables flowtable (S19firewall runs before deferred Wi-Fi bind).
+(sleep 12; /etc/init.d/firewall reload >/dev/null 2>&1) &

@@ -1,0 +1,12 @@
+# Keep Unix LF line endings for Linux/OpenWrt build scripts, shell scripts, and source files
+* text=auto eol=lf
+*.sh text eol=lf
+*.py text eol=lf
+*.dts text eol=lf
+*.dtsi text eol=lf
+Makefile* text eol=lf
+02_network text eol=lf
+11-mt76-caldata text eol=lf
+e2631-wifi-eeprom text eol=lf
+e2631-wifi-on text eol=lf
+x3060z-fwslot text eol=lf

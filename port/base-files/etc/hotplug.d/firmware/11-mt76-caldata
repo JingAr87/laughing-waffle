@@ -1,0 +1,115 @@
+#!/bin/sh
+
+[ -e /lib/firmware/$FIRMWARE ] && exit 0
+
+. /lib/functions/caldata.sh
+
+# Unified MT7915 / MT7905 / MT7916 calibration loader for ZTE/Sanechips ZX279128S/R:
+#   - D-Link DIR-X3060Z (MT7916AN + MT7976DN): chip ID 0x7916 (16 79 in EEPROM)
+#   - D-Link DIR-X1860Z / MT7905DAN + MT7975DN: chip ID 0x7915 (15 79 in EEPROM)
+#   - ZTE ZXHN E2631 / H3600: "caldata" in "wifi" partition
+zte_caldata_from_jffs2() {
+	local part dir=/tmp/wifi-caldata calfile id size
+
+	part=$(find_mtd_part wlan)
+	[ -n "$part" ] || part=$(find_mtd_part wifi)
+	[ -n "$part" ] || caldata_die "no mtd device found for partition wlan/wifi"
+
+	mkdir -p $dir
+	if ! grep -qs " $dir " /proc/mounts; then
+		mount -t jffs2 $part $dir || caldata_die "failed to mount $part"
+	fi
+
+	for f in \
+		"$dir/MT7916_EEPROM.bin" \
+		"$dir/MT7915_EEPROM.bin" \
+		"$dir/MT7905_EEPROM.bin" \
+		"$dir/MT7916_EEPROM_bak.bin" \
+		"$dir/MT7915_EEPROM_bak.bin" \
+		"$dir/MT7905_EEPROM_bak.bin" \
+		"$dir/caldata" \
+		"$dir"/*EEPROM*.bin; do
+		if [ -f "$f" ]; then
+			calfile="$f"
+			break
+		fi
+	done
+	[ -n "$calfile" ] || {
+		umount $dir 2>/dev/null
+		rmdir $dir 2>/dev/null
+		caldata_die "no calibration file found in $part"
+	}
+
+	id=$(hexdump -v -n 2 -e '2/1 "%02x"' "$calfile" 2>/dev/null)
+	size=$(wc -c < "$calfile" 2>/dev/null || echo 0)
+
+	case "$board:$id" in
+	zte,zxhn-h3600:1579)
+		caldata_from_file "$calfile" 0x0 0xe00
+		;;
+	dlink,dir-x1860z:1579|\
+	dlink,dir-x1860z:1679|\
+	dlink,dir-x3060z:1579|\
+	dlink,dir-x3060z:1679|\
+	zte,zxhn-e2631:1679)
+		# Copy up to 0x30000 bytes (or exact file size if smaller, e.g. 0xe00/0x1000
+		# on MT7905/MT7915 builds) so both EEPROM and precal/DPD data are preserved.
+		if [ "$size" -gt 196608 ]; then
+			caldata_from_file "$calfile" 0x0 0x30000
+		elif [ "$size" -gt 0 ]; then
+			caldata_from_file "$calfile" 0x0 "$size"
+		fi
+		# On MT7905DAN + MT7975DN (chip id 0x7915), D-Link's factory EEPROM sets
+		# byte 0x190 (MT_EE_WIFI_CONF0) = 0xd2 (MT_EE_BAND_SEL_DUAL). That makes
+		# mt76 register 5 GHz on phy0 and initialize phy0's chandef to 5 GHz Ch 36,
+		# causing MCU_EXT_CMD_SET_RX_PATH (0x00004eed) timeouts when starting 2.4 GHz.
+		# Clearing bit 6 (0xd2 -> 0x92 = MT_EE_BAND_SEL_2GHZ) fixes 2.4 GHz while
+		# preserving all factory FEM/LNA/TSSI calibration data.
+		if [ "$id" = "1579" ] && [ -w "/lib/firmware/$FIRMWARE" ]; then
+			local b190 oui5g tp_part tp_dir=/tmp/tagparam-cal
+			b190=$(dd if="/lib/firmware/$FIRMWARE" bs=1 skip=400 count=1 2>/dev/null | hexdump -v -e '1/1 "%02x"')
+			if [ "$b190" = "d2" ]; then
+				printf '\x92' | dd of="/lib/firmware/$FIRMWARE" bs=1 seek=400 count=1 conv=notrunc 2>/dev/null
+				echo "caldata: patched $FIRMWARE 0x190 d2->92 (2G-only phy0)" > /dev/kmsg
+			fi
+			# Replace MediaTek placeholder 5 GHz MAC (00:0c:43:...) at 0x0a..0x0f with
+			# this unit's real factory MAC from /tagparam/paramtag (+0x66).
+			oui5g=$(dd if="/lib/firmware/$FIRMWARE" bs=1 skip=10 count=3 2>/dev/null | hexdump -v -e '3/1 "%02x"')
+			if [ "$oui5g" = "000c43" ]; then
+				tp_part=$(find_mtd_part tagparam)
+				if [ -n "$tp_part" ]; then
+					mkdir -p "$tp_dir"
+					if mount -t jffs2 "$tp_part" "$tp_dir" 2>/dev/null; then
+						if [ -f "$tp_dir/paramtag" ]; then
+							dd if="$tp_dir/paramtag" bs=1 skip=102 count=6 2>/dev/null | \
+								dd of="/lib/firmware/$FIRMWARE" bs=1 seek=10 count=6 conv=notrunc 2>/dev/null
+							echo "caldata: patched $FIRMWARE 5G MAC from tagparam+0x66" > /dev/kmsg
+						fi
+						umount "$tp_dir" 2>/dev/null
+					fi
+					rmdir "$tp_dir" 2>/dev/null
+				fi
+			fi
+		fi
+		;;
+	*)
+		echo "caldata: chip id $id in $calfile ($part) does not match board $board" > /dev/kmsg
+		;;
+	esac
+	umount $dir 2>/dev/null
+	rmdir $dir 2>/dev/null
+}
+
+board=$(board_name)
+
+case "$FIRMWARE" in
+"mediatek/mt7915_eeprom.bin"|\
+"mediatek/mt7915_eeprom_dbdc.bin"|\
+"mediatek/mt7916_eeprom.bin")
+	case "$board" in
+	dlink,dir-x1860z|dlink,dir-x3060z|zte,zxhn-h3600|zte,zxhn-e2631)
+		zte_caldata_from_jffs2
+		;;
+	esac
+	;;
+esac

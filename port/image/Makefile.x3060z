@@ -1,0 +1,62 @@
+# SPDX-License-Identifier: GPL-2.0-only
+#
+# D-Link DIR-X3060Z (AX3000, MT7916AN+MT7976DN) & DIR-X1860Z (AX1800, MT7905DAN+MT7975DN)
+# image build definitions for target/linux/sanechips/image/Makefile.
+# Include this file just before $(eval $(call BuildImage)).
+
+define Build/x3060z-kernel-hdr
+	python3 $(TOPDIR)/tools/pack_x3060z.py pack-kernel \
+		--board $(1) \
+		--kernel $@ \
+		--out $@.new
+	mv $@.new $@
+endef
+
+define Build/x3060z-factory
+	python3 $(TOPDIR)/tools/pack_x3060z.py pack \
+		--board $(1) \
+		--kernel $(IMAGE_KERNEL) \
+		--rootfs $(IMAGE_ROOTFS) \
+		--out $@
+endef
+
+# Common device template shared by DIR-X3060Z and DIR-X1860Z
+define Device/dlink_zx279128r_common
+  DEVICE_VENDOR := D-Link
+  DEVICE_VARIANT := V1.0
+  DEVICE_DTS_DIR := $(TOPDIR)/target/linux/sanechips/dts
+  # Slot 0 kernel0 (mtd3) is 5 MiB (5120 KiB); 480-byte (0x1E0) header + uImage
+  KERNEL_SIZE := 5120k
+  KERNEL_INITRAMFS := kernel-bin | append-dtb | uImage-ramboot
+  # Both kmod-mt7916-firmware (MT7916AN+MT7976DN on DIR-X3060Z) and
+  # kmod-mt7915-firmware (MT7905DAN+MT7975DN on DIR-X1860Z) are included.
+  DEVICE_PACKAGES := kmod-mt7915e kmod-mt7915-firmware kmod-mt7916-firmware \
+	kmod-nft-offload ubi-utils block-mount \
+	libustream-mbedtls \
+	luci luci-proto-ppp luci-app-ttyd ttyd \
+	luci-theme-bootstrap
+  IMAGES := factory.bin kernel0.bin rootfs0.bin sysupgrade.bin
+  IMAGE/kernel0.bin := append-kernel
+  IMAGE/rootfs0.bin := append-rootfs | pad-to 128k
+  IMAGE/sysupgrade.bin := sysupgrade-tar | append-metadata
+endef
+
+define Device/dlink_dir-x3060z
+  $(Device/dlink_zx279128r_common)
+  DEVICE_MODEL := DIR-X3060Z
+  DEVICE_DTS := zx279128r-dlink-dir-x3060z
+  KERNEL := kernel-bin | append-dtb | uImage none | x3060z-kernel-hdr dir-x3060z | \
+	check-size $$(KERNEL_SIZE)
+  IMAGE/factory.bin := x3060z-factory dir-x3060z
+endef
+TARGET_DEVICES += dlink_dir-x3060z
+
+define Device/dlink_dir-x1860z
+  $(Device/dlink_zx279128r_common)
+  DEVICE_MODEL := DIR-X1860Z
+  DEVICE_DTS := zx279128r-dlink-dir-x1860z
+  KERNEL := kernel-bin | append-dtb | uImage none | x3060z-kernel-hdr dir-x1860z | \
+	check-size $$(KERNEL_SIZE)
+  IMAGE/factory.bin := x3060z-factory dir-x1860z
+endef
+TARGET_DEVICES += dlink_dir-x1860z
