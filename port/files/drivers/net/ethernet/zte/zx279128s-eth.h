@@ -221,7 +221,7 @@
 /* DMA descriptor rings */
 #define ZX_NUM_TX_DESC		1024
 #define ZX_TX_QUEUE_LIMIT	256
-#define ZX_TX_RECLAIM_THRESH	64	/* batch read-to-clear ZX_DMA_TX_DONE */
+#define ZX_TX_RECLAIM_THRESH	32	/* batch read-to-clear ZX_DMA_TX_DONE */
 #define ZX_TX_STALL_MS		150	/* trigger DMA recovery on stalled full ring */
 #define ZX_TX_POLL_US		250	/* see zx_tx_kick() */
 
