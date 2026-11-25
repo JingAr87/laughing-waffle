@@ -17,6 +17,7 @@ OpenWrt (`Linux 6.18.55`, `sanechips` target) board port, device trees, native `
 | **OpenWrt Flash Slot** | **Slot 1** (`0x00700000` + `0x03800000`, Stock Slot 0 preserved!) | **Slot 0** (`0x00200000` + `0x00c00000`, Stock Slot 1 preserved!) |
 | **Writable Overlay** | ~24.9 MiB JFFS2 (`rootfs_data`) | ~24.9 MiB JFFS2 (`rootfs_data`) |
 | **LuCI `sysupgrade`** | Supported & verified (preserves settings) | Supported |
+| **SoC & Wi-Fi Thermal** | Live SoC temp (`/sys/class/thermal/thermal_zone0/temp`, `temp@94100034`) + `MT7905DAN` `hwmon` | Live SoC temp (`temp@94100034`) + `MT7916AN` `hwmon` |
 | **LEDs & Buttons** | Power, Internet, Wi-Fi, LAN1–3, WAN + Reset & WPS verified | Mapped from `vmlinux.bin` + `bspdriver.ko` |
 
 ---
@@ -48,17 +49,19 @@ mtd erase others && reboot   # Restore factory Slot 0 selector and boot Stock
 
 ## Known Notes
 - **Deferred Wi-Fi Startup (~60 s):** `mt7915e` is bound outside early boot (`S95`) so SSH/LuCI always come up first. On `MT7905DAN`, `e2631-wifi-on` automatically runs a one-shot L0 full recovery (`sys_recovery=7`) to wake WFDMA0 RX on both bands, and `11-mt76-caldata` patches EEPROM byte `0x190` (`0xd2 → 0x92`) + 5 GHz MAC from `/tagparam/paramtag` on the fly.
-- **Hardware Acceleration:** Wired WAN ↔ LAN NAT uses the ZX279128R hardware flow offload engine (~900+ Mbps). Wi-Fi ↔ Ethernet forwarding runs on the dual-core 1 GHz Cortex-A9 CPU (~440+ Mbps on 5 GHz 80 MHz 2×2 with `packet_steering=1` and `fw4` flowtable).
+- **Hardware Acceleration & v1.1 Performance:** Wired WAN ↔ LAN NAT uses the ZX279128R hardware flow offload engine (~900+ Mbps). On **v1.1**, Wi-Fi ↔ Ethernet forwarding runs on the dual-core 1 GHz Cortex-A9 with cacheable streaming DMA `buffer_pool` (`dma_alloc_noncoherent`), `writel_relaxed()` on Ethernet & `mt76` IRQ registers (eliminating global `l2x0_io_lock` SMP contention), batched `ZX_DMA_TX_DONE` reclaim, and `packet_steering='2'` — verified at **458 Mbps upload** (peak 480 Mbps) and **274–307 Mbps download** on 5 GHz 80 MHz 2×2.
+- **Ethernet Stability & Auto-Recovery (v1.1):** Clean 32-bit TX descriptor writes, a `!priv->link_up` TX drop guard (prevents link flaps / 100 Mbps WAN swaps from wedging the shared TX ring), and a 1-second DMA stall recovery watchdog (`zx_eth_reset_work`) are included in `port/files/drivers/net/ethernet/zte/zx279128s-main.c`.
+- **On-Die SoC Thermal Sensor (v1.1):** `port/files/drivers/thermal/zx279128s_thermal.c` drives the `ZX279128R/S` thermal sensor (`temp@94100034`), exposing live SoC temperature at `/sys/class/thermal/thermal_zone0/temp` alongside `mt7915_phy0`/`phy1` in `/sys/class/hwmon/`.
 - **U-Boot `do_mcupg` Early-Boot DMA Fix:** Stock D-Link U-Boot runs `do_mcupg` on every boot and jumps to Linux without halting Ethernet switch/BMU/DMA (`buf=0x41000000`). Both `port/patches-6.18/901-arm-compressed-zx279128s-quiesce-eth.patch` (inside `decompress_kernel()`, before `zImage` decompresses) and `port/files/arch/arm/mach-zte/zx279128s.c` (`.reserve` safety backup) quiesce all 5 MACs, DMA, BMU, PP, and hold `ZX_GLB_RESET = 0` until `zx279128s-eth` probes (verified **12/12 consecutive warm + cold boots** with WAN + LAN connected).
 - **ZTE `earlycon` Support:** `port/patches-6.18/900-amba-pl011-zte-earlycon.patch` enables live UART console output from `[ 0.000000]` using ZTE's `ZX_UART011_DR` / `ZX_UART011_FR` registers.
 
 ---
 
 ## Repository Structure
-- [`ROADMAP.md`](ROADMAP.md) — Milestone tracker and release status.
-- [`PROJECT_FINDINGS_X1860Z.md`](PROJECT_FINDINGS_X1860Z.md) — D-Link `DIR-X1860Z` hardware architecture, live OpenWrt bring-up, MT7905DAN fixes, and LED/GPIO mapping.
-- [`PROJECT_FINDINGS.md`](PROJECT_FINDINGS.md) — D-Link `DIR-X3060Z` hardware architecture, SPI-NAND partition table, and bootloader analysis.
-- [`NEW_BOARD_CHECKLIST.md`](NEW_BOARD_CHECKLIST.md) — Reusable feasibility & porting checklist for other `ZX279128S`/`ZX279128R` boards.
+- [`docs/ROADMAP.md`](docs/ROADMAP.md) — Milestone tracker and release status.
+- [`docs/PROJECT_FINDINGS_X1860Z.md`](docs/PROJECT_FINDINGS_X1860Z.md) — D-Link `DIR-X1860Z` hardware architecture, live OpenWrt bring-up, MT7905DAN fixes, and LED/GPIO mapping.
+- [`docs/PROJECT_FINDINGS.md`](docs/PROJECT_FINDINGS.md) — D-Link `DIR-X3060Z` hardware architecture, SPI-NAND partition table, and bootloader analysis.
+- [`docs/NEW_BOARD_CHECKLIST.md`](docs/NEW_BOARD_CHECKLIST.md) — Reusable feasibility & porting checklist for other `ZX279128S`/`ZX279128R` boards.
 - [`port/`](port/) — OpenWrt target overlay and build tooling:
   - [`port/dts/`](port/dts/) — OpenWrt Device Trees for `DIR-X1860Z` and `DIR-X3060Z`.
   - [`port/pack_x3060z.py`](port/pack_x3060z.py) — Standalone `0x1E0` firmware header packer & verifier (`480/480` byte-exact self-test across all 4 slots).
