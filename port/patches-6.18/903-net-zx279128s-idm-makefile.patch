@@ -1,0 +1,11 @@
+From: Antigravity <dev@openwrt.org>
+Subject: [PATCH] net: ethernet: zte: add zx279128s-idm.o to Makefile
+
+--- a/drivers/net/ethernet/zte/Makefile
++++ b/drivers/net/ethernet/zte/Makefile
+@@ -1,4 +1,4 @@
+ # SPDX-License-Identifier: GPL-2.0-only
+ obj-$(CONFIG_ZX279128S_ETH) += zx279128s-eth.o
+-zx279128s-eth-y := zx279128s-main.o zx279128s-ppe.o zx279128s-switch.o
++zx279128s-eth-y := zx279128s-main.o zx279128s-ppe.o zx279128s-switch.o zx279128s-idm.o
+ zx279128s-eth-$(CONFIG_ZX_FFE) += zx279128s-ffe.o

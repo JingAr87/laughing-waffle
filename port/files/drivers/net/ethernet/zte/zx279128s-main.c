@@ -430,14 +430,14 @@ static void zx_pp_init(struct zx_eth_adapter *adapter)
 	 */
 	writel(0x00000000, base + ZX_SBRG_LEARN);
 	writel(0xff5ffdff, base + 0x388340);
-	writel(0x0000003e, base + 0x388344);
-	writel(0x0000003f, base + 0x388380);
+	writel(0x000000fe, base + 0x388344);
+	writel(0x000000ff, base + 0x388380);
 	writel(0xaaaaaaaa, base + 0x38863c);
 	writel(0x00005555, base + 0x3881c4);
 	writel(0x000bf874, base + 0x388188);
 	writel(0x000000ff, base + 0x3882c0);
 	writel(0x0000ffff, base + 0x388300);
-	writel(0x0000003e, base + 0x388304);
+	writel(0x000000fe, base + 0x388304);
 
 	writel(0x0000309a, base + 0x38c080);
 	writel(0, base + 0x38c088);
@@ -612,8 +612,8 @@ static int zx_hw_init(struct zx_eth_adapter *adapter)
 	writel(ETH_P_ARP << 16 | ETH_P_8021Q, base + ZX_SPA_TRAP_ETH_TYPE + 4);
 	writel(0, base + ZX_SPA_TRAP_PROTO);
 
-	/* Clear port filter bits for ports 0-4 */
-	for (i = 0; i < ZX_NUM_PORTS; i++) {
+	/* Clear port filter bits for MAC ports 0-4 and IDM ports 5-6 (bp=6,7) */
+	for (i = 0; i < ZX_NUM_PORTS + 2; i++) {
 		val = readl(base + ZX_SW_PORT_FILTER(i));
 		val &= ~ZX_SW_PORT_FILTER_BITS;
 		writel(val, base + ZX_SW_PORT_FILTER(i));
@@ -904,7 +904,23 @@ static int zx_eth_rx(struct zx_eth_adapter *adapter, int budget)
 			}
 
 			/* Deliver to the netdev of the ingress port */
-			dest_dev = port < ZX_NUM_PORTS ? adapter->ports[port] : NULL;
+			if (port < ZX_NUM_PORTS) {
+				dest_dev = adapter->ports[port];
+				if (len >= ETH_HLEN &&
+				    (READ_ONCE(adapter->sw_members) & BIT(ZX_BRPORT(port)))) {
+					u8 *d = adapter->buffer_pool + bp * ZX_BUF_SIZE + 16;
+
+					zx_idm_learn_lan_mac(adapter, d + ETH_ALEN);
+				}
+			} else if (port == 5 || port == 6) {
+				u8 *d = adapter->buffer_pool + bp * ZX_BUF_SIZE + 16;
+
+				dest_dev = zx_idm_resolve_cpu_dev(adapter, port - 5, d);
+				if (dest_dev)
+					adapter->idm_cpu_fallback++;
+			} else {
+				dest_dev = NULL;
+			}
 
 			skb = napi_alloc_skb(&adapter->napi, len);
 			if (skb && dest_dev && (dest_dev->flags & IFF_UP)) {
@@ -1061,6 +1077,7 @@ static void zx_eth_reset_work(struct work_struct *work)
 			netif_stop_queue(adapter->ports[p]);
 
 	hrtimer_cancel(&adapter->tx_timer);
+	zx_idm_quiesce(adapter);
 	if (adapter->open_count) {
 		napi_disable(&adapter->napi);
 		writel(~0, adapter->base + ZX_TM_INT_MASK);
@@ -1079,6 +1096,7 @@ static void zx_eth_reset_work(struct work_struct *work)
 		zx_update_traps(adapter);
 		mutex_unlock(&adapter->ppe_lock);
 		zx_dma_enable(adapter, true);
+		zx_idm_resume(adapter);
 
 		for (p = 0; p < ZX_NUM_PORTS; p++) {
 			struct zx_eth_priv *priv;
@@ -1368,12 +1386,16 @@ static int zx_eth_dma_state_show(struct seq_file *s, void *data)
 	seq_printf(s, "rx_alias=%u rx_nobuf=%u rx_rel_fail=%u rx_bad=%u\n",
 		   adapter->rx_alias_cnt, adapter->rx_nobuf_cnt,
 		   adapter->rx_rel_fail, adapter->rx_bad_cnt);
-	seq_printf(s, "ppe_active=%u ppe_flows=%u ppe_add_skip=%u ppe_add_fail=%u\n",
+	seq_printf(s, "ppe_active=%u ppe_flows=%u ppe_add_skip=%u (in=%u v4=%u act=%u out=%u mac=%u) ppe_add_fail=%u\n",
 		   adapter->ppe_active, adapter->ppe_count,
-		   adapter->ppe_add_skip, adapter->ppe_add_fail);
+		   adapter->ppe_add_skip, adapter->ppe_skip_in,
+		   adapter->ppe_skip_v4, adapter->ppe_skip_act,
+		   adapter->ppe_skip_out, adapter->ppe_skip_mac,
+		   adapter->ppe_add_fail);
 	seq_printf(s, "sw_members=%#x sw_fdb_deleted=%u\n",
 		   adapter->sw_members,
 		   adapter->sw_fdb_deleted);
+	zx_idm_debugfs_show(adapter, s);
 	seq_printf(s, "bmu_alloc_fail=%u bmu_alloc_late=%u bmu_free_fail=%u bmu_free_slots=%u\n",
 		   adapter->bmu_alloc_fail, adapter->bmu_alloc_late,
 		   adapter->bmu_free_fail, adapter->bmu_free_slots);
@@ -1457,6 +1479,7 @@ static int zx_eth_probe(struct platform_device *pdev)
 	adapter->irq = platform_get_irq(pdev, 0);
 	if (adapter->irq < 0)
 		return adapter->irq;
+	adapter->idm_irq = platform_get_irq_optional(pdev, 1);
 
 	adapter->dev = dev;
 	spin_lock_init(&adapter->tx_lock);
@@ -1477,6 +1500,11 @@ static int zx_eth_probe(struct platform_device *pdev)
 	ret = rhashtable_init(&adapter->ppe_flows, &zx_ppe_ht_params);
 	if (ret)
 		return ret;
+	ret = rhashtable_init(&adapter->ppe_wifi_ul_flows, &zx_ppe_ul_ht_params);
+	if (ret) {
+		rhashtable_destroy(&adapter->ppe_flows);
+		return ret;
+	}
 
 	adapter->buffer_pool = dma_alloc_noncoherent(dev, ZX_BUF_POOL_SIZE,
 						     &adapter->buf_pool_dma,
@@ -1637,6 +1665,7 @@ static int zx_eth_probe(struct platform_device *pdev)
 	platform_set_drvdata(pdev, adapter);
 
 	zx_sw_init(adapter);
+	zx_idm_init(adapter);
 	schedule_delayed_work(&adapter->mib_work, ZX_MIB_INTERVAL);
 
 	zx_eth_debugfs_init(adapter);
@@ -1667,6 +1696,7 @@ err_dma:
 	dma_free_noncoherent(dev, ZX_BUF_POOL_SIZE, adapter->buffer_pool,
 			     adapter->buf_pool_dma, DMA_BIDIRECTIONAL);
 err_hashtable:
+	rhashtable_destroy(&adapter->ppe_wifi_ul_flows);
 	rhashtable_destroy(&adapter->ppe_flows);
 	return ret;
 }
@@ -1696,6 +1726,7 @@ static void zx_eth_shutdown(struct platform_device *pdev)
 	rtnl_unlock();
 	cancel_work_sync(&adapter->sw_work);
 	cancel_delayed_work_sync(&adapter->mib_work);
+	zx_idm_quiesce(adapter);
 
 	zx_hw_reset(adapter);
 }

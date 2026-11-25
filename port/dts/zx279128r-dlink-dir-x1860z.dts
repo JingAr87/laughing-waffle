@@ -138,6 +138,8 @@
 };
 
 &gmac {
+	interrupts = <GIC_SPI 36 IRQ_TYPE_LEVEL_HIGH>,
+		     <GIC_SPI 38 IRQ_TYPE_LEVEL_HIGH>;
 	status = "okay";
 };
 

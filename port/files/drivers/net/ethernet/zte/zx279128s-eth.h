@@ -19,6 +19,7 @@
 #include <linux/spinlock.h>
 #include <linux/types.h>
 #include <linux/workqueue.h>
+#include <net/page_pool/types.h>
 
 #define DRV_NAME		"zx279128s-eth"
 
@@ -39,6 +40,36 @@
 #define  ZX_SW_PORT_FILTER_BITS	GENMASK(25, 23)	/* cleared for every port */
 #define ZX_SW_FWD_CTRL		0x1cc000
 #define  ZX_SW_FWD_CTRL_ON	17
+
+/* IDM (Integrated DMA for Wi-Fi virtual switch ports bp=6,7) */
+#define ZX_IDM_BASE		0x1c8000
+#define ZX_IDM_CTRL		(ZX_IDM_BASE + 0x00)
+#define ZX_IDM_TX_RING_BASE	(ZX_IDM_BASE + 0x04)
+#define ZX_IDM_RX_RING_BASE	(ZX_IDM_BASE + 0x08)
+#define ZX_IDM_RING_SIZE	(ZX_IDM_BASE + 0x0c)
+#define ZX_IDM_TX_INT_THRESH	(ZX_IDM_BASE + 0x10)
+#define ZX_IDM_RX_INT_THRESH	(ZX_IDM_BASE + 0x18)
+#define ZX_IDM_INT_TIMER	(ZX_IDM_BASE + 0x1c)
+#define ZX_IDM_INT_STATUS	(ZX_IDM_BASE + 0x20)
+#define  ZX_IDM_INT_RX		BIT(2)
+#define  ZX_IDM_INT_TX_DONE	BIT(4)
+#define ZX_IDM_INT_MASK		(ZX_IDM_BASE + 0x24)	/* 1: masked */
+#define  ZX_IDM_INT_ALL		0x1f
+#define ZX_IDM_TX_DOORBELL	(ZX_IDM_BASE + 0x40)
+#define ZX_IDM_TX_DONE_CNT	(ZX_IDM_BASE + 0x44)
+#define ZX_IDM_RX_DOORBELL	(ZX_IDM_BASE + 0x48)
+#define ZX_IDM_RX_AVAIL_CNT	(ZX_IDM_BASE + 0x4c)
+#define ZX_IDM_DMA_CTRL2	(ZX_IDM_BASE + 0xc0)
+
+#define ZX_IDM_RING_LEN		4096
+#define ZX_IDM_RING_MASK	(ZX_IDM_RING_LEN - 1)
+#define ZX_IDM_DESC_SIZE	8
+#define ZX_IDM_RING_ALLOC_SIZE	0x10020
+#define ZX_IDM_RX_FRAG_SIZE	2048
+#define ZX_IDM_RX_HEADROOM	128
+#define ZX_IDM_MAX_WIFI_DEVS	16
+#define ZX_IDM_MAC_BUCKETS	256
+#define ZX_IDM_BRPORT(idm_port)	(6 + (idm_port))
 
 /* Switch port attributes (stock tm.ko "spa") */
 #define ZX_SPA_UP_REG_PKT_EN	0x1d4000
@@ -362,6 +393,11 @@ struct zx_eth_adapter {
 	u32			ppe_count;
 	u32			ppe_add_skip;	/* flows the hardware cannot take */
 	u32			ppe_add_fail;	/* no free entry, access timeout */
+	u32			ppe_skip_in;
+	u32			ppe_skip_v4;
+	u32			ppe_skip_act;
+	u32			ppe_skip_out;
+	u32			ppe_skip_mac;
 
 	/* Hardware LAN switching between the ports of one Linux bridge */
 	spinlock_t		trap_lock;	/* zx_update_traps() */
@@ -380,6 +416,68 @@ struct zx_eth_adapter {
 	struct notifier_block	sw_netdev_nb;
 	struct notifier_block	sw_switchdev_nb;
 	struct notifier_block	sw_switchdev_blocking_nb;
+
+	/* IDM Wi-Fi <-> Switch/PPE hardware offload */
+	struct rhashtable	ppe_wifi_ul_flows;
+	int			idm_irq;
+	bool			idm_ready;
+	struct napi_struct	idm_napi;
+	struct page_pool	*idm_rx_pool;
+	void			*idm_ring_mem;
+	dma_addr_t		idm_ring_dma;
+	__le32			*idm_rx_ring;
+	dma_addr_t		idm_rx_ring_dma;
+	__le32			*idm_tx_ring;
+	dma_addr_t		idm_tx_ring_dma;
+
+	struct page		**idm_rx_pages;
+	u32			*idm_rx_offsets;
+	u32			idm_rx_cons;
+
+	spinlock_t		idm_tx_lock;
+	struct sk_buff		**idm_tx_skbs;
+	dma_addr_t		*idm_tx_dmas;
+	u16			*idm_tx_lens;
+	u32			idm_tx_prod;
+	u32			idm_tx_cons;
+	u32			idm_tx_pending;
+	u32			idm_tx_unflushed;
+
+	spinlock_t		idm_dev_lock;
+	struct net_device	*idm_wifi_devs[ZX_IDM_MAX_WIFI_DEVS];
+	u8			idm_wifi_port[ZX_IDM_MAX_WIFI_DEVS];
+	u8			idm_wifi_ssid[ZX_IDM_MAX_WIFI_DEVS];
+	u8			idm_br_mac[ETH_ALEN];
+	bool			idm_br_mac_valid;
+
+	/* Fast direct-mapped MAC tables (256 buckets, lockless RCU-style read) */
+	struct {
+		u8			mac[ETH_ALEN];
+		u8			valid;
+		struct net_device	*dev;
+	} idm_sta_tab[ZX_IDM_MAC_BUCKETS];
+	struct {
+		u8			mac[ETH_ALEN];
+		u8			valid;
+	} idm_lan_tab[ZX_IDM_MAC_BUCKETS];
+
+	/* IDM debugfs counters */
+	u32			idm_irq_cnt;
+	u32			idm_rx_pkts;
+	u32			idm_rx_drop;
+	u32			idm_rx_bcmc_drop;
+	u32			idm_rx_nomap;
+	u32			idm_tx_l2;
+	u32			idm_tx_l3;
+	u32			idm_tx_done;
+	u32			idm_tx_full;
+	u32			idm_cpu_fallback;
+};
+
+struct zx_ppe_tuple {
+	u8	proto;
+	__be32	saddr, daddr;
+	__be16	sport, dport;
 };
 
 /* zx279128s-main.c */
@@ -388,6 +486,7 @@ void zx_set_trap_dmac(struct zx_eth_adapter *adapter, int idx, const u8 *mac);
 
 /* zx279128s-ppe.c */
 extern const struct rhashtable_params zx_ppe_ht_params;
+extern const struct rhashtable_params zx_ppe_ul_ht_params;
 void zx_update_traps(struct zx_eth_adapter *adapter);
 void zx_update_mac_tables(struct zx_eth_adapter *adapter);
 int zx_eth_setup_tc(struct net_device *dev, enum tc_setup_type type,
@@ -397,5 +496,29 @@ int zx_eth_setup_tc(struct net_device *dev, enum tc_setup_type type,
 void zx_sw_init(struct zx_eth_adapter *adapter);
 void zx_sw_work(struct work_struct *work);
 void zx_sw_port_down(struct zx_eth_adapter *adapter, int port);
+
+/* zx279128s-idm.c */
+void zx_idm_init(struct zx_eth_adapter *adapter);
+void zx_idm_quiesce(struct zx_eth_adapter *adapter);
+void zx_idm_resume(struct zx_eth_adapter *adapter);
+void zx_idm_netdev_event(struct zx_eth_adapter *adapter, unsigned long event,
+			 struct net_device *dev);
+bool zx_idm_is_wifi_dev(struct zx_eth_adapter *adapter,
+			const struct net_device *dev);
+bool zx_idm_dev_to_brport(struct zx_eth_adapter *adapter,
+			  const struct net_device *dev, int *brport);
+bool zx_idm_mac_to_brport(struct zx_eth_adapter *adapter,
+			  const u8 *mac, int *brport);
+bool zx_idm_ifindex_is_wifi(struct zx_eth_adapter *adapter, int ifindex);
+bool zx_idm_ifindex_is_bridge(struct zx_eth_adapter *adapter, int ifindex);
+struct net_device *zx_idm_get_bridge_dev(struct zx_eth_adapter *adapter,
+					 int idm_port);
+void zx_idm_learn_lan_mac(struct zx_eth_adapter *adapter, const u8 *mac);
+void zx_idm_forget_sta_mac(struct zx_eth_adapter *adapter, const u8 *mac);
+struct net_device *zx_idm_resolve_cpu_dev(struct zx_eth_adapter *adapter,
+					  int idm_port, const u8 *frame);
+void zx_idm_debugfs_show(struct zx_eth_adapter *adapter, struct seq_file *s);
+bool zx_idm_wifi_rx(struct sk_buff *skb);
+void zx_idm_wifi_rx_flush(void);
 
 #endif
