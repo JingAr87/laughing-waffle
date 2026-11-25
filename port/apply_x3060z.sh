@@ -104,13 +104,11 @@ echo "[7/7] Setting kernel command line for Slot rootfs (mtdblock3 on both X3060
 CFG="$TREE/target/linux/sanechips/config-6.18"
 if [ -f "$CFG" ]; then
 	sed -i -e '/^CONFIG_CMDLINE_BOOL=y$/d' -e '/^CONFIG_CMDLINE_FORCE=y$/d' \
-	       -e '/^CONFIG_CMDLINE=/d' -e '/^CONFIG_HWMON=/d' -e '/^CONFIG_THERMAL_HWMON=/d' "$CFG"
+	       -e '/^CONFIG_CMDLINE=/d' "$CFG"
 	cat >> "$CFG" << 'EOF'
 CONFIG_CMDLINE_BOOL=y
 CONFIG_CMDLINE="console=ttyAMA0,115200n8 earlycon root=/dev/mtdblock3 rootfstype=squashfs,jffs2 ro rootwait"
 CONFIG_CMDLINE_FORCE=y
-CONFIG_HWMON=y
-CONFIG_THERMAL_HWMON=y
 EOF
 fi
 
