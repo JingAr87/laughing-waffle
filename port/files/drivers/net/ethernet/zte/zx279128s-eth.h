@@ -222,7 +222,7 @@
 #define ZX_NUM_TX_DESC		1024
 #define ZX_TX_QUEUE_LIMIT	256
 #define ZX_TX_RECLAIM_THRESH	64	/* batch read-to-clear ZX_DMA_TX_DONE */
-#define ZX_TX_STALL_MS		50	/* self-heal drifted tx_pending */
+#define ZX_TX_STALL_MS		150	/* trigger DMA recovery on stalled full ring */
 #define ZX_TX_POLL_US		250	/* see zx_tx_kick() */
 
 /*
@@ -276,6 +276,9 @@ struct zx_eth_priv {
 	struct net_device	*netdev;
 	struct zx_eth_adapter	*adapter;
 	int			port;
+	int			speed;
+	int			duplex;
+	bool			link_up;
 	struct phylink		*phylink;
 	struct phylink_config	phylink_config;
 
@@ -313,7 +316,13 @@ struct zx_eth_adapter {
 	u32			tx_complete_cnt;
 	u32			tx_done_excess;
 	u32			tx_reclaim_resets;
+	u32			tx_stall_resets;
+	u32			hw_resets;
 	unsigned long		tx_stall_start;
+	u32			last_tx_complete;
+	bool			stall_armed;
+	struct work_struct	reset_work;
+	struct delayed_work	stall_work;
 	u32			bmu_free_slots;
 	u32			bmu_alloc_fail;
 	u32			bmu_alloc_late;		/* buffers of timed-out requests */

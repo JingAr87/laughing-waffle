@@ -1,0 +1,77 @@
+From: Antigravity <dev@openwrt.org>
+Subject: [PATCH] wifi: mt76: use writel_relaxed for MT7915 IRQ mask/ack registers
+
+On ARMv7 platforms with CONFIG_CACHE_L2X0_IO_LOCK + CONFIG_ARM_HEAVY_MB,
+every writel() calls outer_cache.sync() and acquires the global IRQ-disabling
+l2x0_io_lock spinlock. Pure IRQ mask/ack register writes in mt76_set_irq_mask,
+mt7915_irq_handler, and mt7915_irq_tasklet do not precede DMA descriptor
+handoffs and can safely use writel_relaxed() to avoid cross-core contention
+with Ethernet DMA sync operations.
+
+--- a/mmio.c
++++ b/mmio.c
+@@ -101,7 +101,7 @@ void mt76_set_irq_mask(struct mt76_dev *
+ 			mtk_wed_device_irq_set_mask(&dev->mmio.wed,
+ 						    dev->mmio.irqmask);
+ 		else
+-			mt76_mmio_wr(dev, addr, dev->mmio.irqmask);
++			writel_relaxed(dev->mmio.irqmask, dev->mmio.regs + addr);
+ 	}
+ 	spin_unlock_irqrestore(&dev->mmio.irq_lock, flags);
+ }
+--- a/mt7915/mmio.c
++++ b/mt7915/mmio.c
+@@ -822,6 +822,16 @@ void mt7915_dual_hif_set_irq_mask(struct
+ 	spin_unlock_irqrestore(&mdev->mmio.irq_lock, flags);
+ }
+ 
++static inline void mt7915_wr_relaxed(struct mt7915_dev *dev, u32 offset, u32 val)
++{
++	u32 addr = __mt7915_reg_addr(dev, offset);
++
++	if (likely(addr))
++		writel_relaxed(val, dev->mt76.mmio.regs + addr);
++	else
++		mt76_wr(dev, offset, val);
++}
++
+ /* TODO: support 2/4/6/8 MSI-X vectors */
+ static void mt7915_irq_tasklet(struct tasklet_struct *t)
+ {
+@@ -835,19 +845,19 @@ static void mt7915_irq_tasklet(struct ta
+ 			mt76_wr(dev, MT_INT1_MASK_CSR, 0);
+ 		intr = mtk_wed_device_irq_get(wed, dev->mt76.mmio.irqmask);
+ 	} else {
+-		mt76_wr(dev, MT_INT_MASK_CSR, 0);
++		mt7915_wr_relaxed(dev, MT_INT_MASK_CSR, 0);
+ 		if (dev->hif2)
+-			mt76_wr(dev, MT_INT1_MASK_CSR, 0);
++			mt7915_wr_relaxed(dev, MT_INT1_MASK_CSR, 0);
+ 
+ 		intr = mt76_rr(dev, MT_INT_SOURCE_CSR);
+ 		intr &= dev->mt76.mmio.irqmask;
+-		mt76_wr(dev, MT_INT_SOURCE_CSR, intr);
++		mt7915_wr_relaxed(dev, MT_INT_SOURCE_CSR, intr);
+ 	}
+ 
+ 	if (dev->hif2) {
+ 		intr1 = mt76_rr(dev, MT_INT1_SOURCE_CSR);
+ 		intr1 &= dev->mt76.mmio.irqmask;
+-		mt76_wr(dev, MT_INT1_SOURCE_CSR, intr1);
++		mt7915_wr_relaxed(dev, MT_INT1_SOURCE_CSR, intr1);
+ 
+ 		intr |= intr1;
+ 	}
+@@ -901,10 +911,10 @@ irqreturn_t mt7915_irq_handler(int irq,
+ 	if (mtk_wed_device_active(wed))
+ 		mtk_wed_device_irq_set_mask(wed, 0);
+ 	else
+-		mt76_wr(dev, MT_INT_MASK_CSR, 0);
++		mt7915_wr_relaxed(dev, MT_INT_MASK_CSR, 0);
+ 
+ 	if (dev->hif2)
+-		mt76_wr(dev, MT_INT1_MASK_CSR, 0);
++		mt7915_wr_relaxed(dev, MT_INT1_MASK_CSR, 0);
+ 
+ 	if (!test_bit(MT76_STATE_INITIALIZED, &dev->mphy.state))
+ 		return IRQ_NONE;

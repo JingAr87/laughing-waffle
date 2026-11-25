@@ -145,7 +145,7 @@
  * 4x integrated Gigabit PHYs confirmed from stock vmlinux uni_phy @ 0xc05d1a90
  * ({0x0d, 0x0a, 0x0b, 0x0c}) and /proc/interrupts (gephy0..gephy3 on GIC 71..74).
  * Factory MAC addresses live inside the JFFS2 file /tagparam/paramtag (mtd "tagparam"
- * at flash offset 0x04c00000, file offset +0x36 = c8:78:7d:xx:xx:04 .. +0x66 = d6:08)
+ * at flash offset 0x04c00000, file offset +0x36 = c8:78:7d:52:d6:04 .. +0x66 = d6:08)
  * and are applied by /etc/board.d/02_network.
  */
 &gmac {
@@ -389,4 +389,30 @@
 
 &l2cc {
 	zte,l2c-io-read-lock;
+};
+
+/ {
+	soc {
+		soc_thermal: temp@94100034 {
+			compatible = "zxic,tempsensor";
+			reg = <0x94100034 0xc>;
+			#thermal-sensor-cells = <0>;
+		};
+	};
+
+	thermal-zones {
+		soc-thermal {
+			polling-delay-passive = <2000>;
+			polling-delay = <5000>;
+			thermal-sensors = <&soc_thermal>;
+
+			trips {
+				soc_crit: crit {
+					temperature = <110000>;
+					hysteresis = <5000>;
+					type = "critical";
+				};
+			};
+		};
+	};
 };

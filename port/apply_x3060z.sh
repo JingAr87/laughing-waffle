@@ -28,20 +28,28 @@ cp "$HERE/dts/zx279128r-dlink-dir-x3060z.dts" \
 cp "$HERE/dts/zx279128r-dlink-dir-x1860z.dts" \
    "$TREE/target/linux/sanechips/dts/zx279128r-dlink-dir-x1860z.dts"
 
-echo "[2/7] Installing ZX279128S/R kernel fixes (U-Boot eth DMA quiesce, ZTE earlycon, eth TX/RX perf)..."
+echo "[2/7] Installing ZX279128S/R kernel fixes (U-Boot eth DMA quiesce, ZTE earlycon, thermal sensor, eth & mt76 perf)..."
 mkdir -p "$TREE/target/linux/sanechips/patches-6.18"
 mkdir -p "$TREE/target/linux/sanechips/files/arch/arm/mach-zte"
 mkdir -p "$TREE/target/linux/sanechips/files/drivers/net/ethernet/zte"
+mkdir -p "$TREE/target/linux/sanechips/files/drivers/thermal"
+mkdir -p "$TREE/package/kernel/mt76/patches"
 cp "$HERE/patches-6.18/900-amba-pl011-zte-earlycon.patch" \
    "$TREE/target/linux/sanechips/patches-6.18/900-amba-pl011-zte-earlycon.patch"
 cp "$HERE/patches-6.18/901-arm-compressed-zx279128s-quiesce-eth.patch" \
    "$TREE/target/linux/sanechips/patches-6.18/901-arm-compressed-zx279128s-quiesce-eth.patch"
+cp "$HERE/patches-6.18/902-thermal-zx279128s-makefile.patch" \
+   "$TREE/target/linux/sanechips/patches-6.18/902-thermal-zx279128s-makefile.patch"
 cp "$HERE/files/arch/arm/mach-zte/zx279128s.c" \
    "$TREE/target/linux/sanechips/files/arch/arm/mach-zte/zx279128s.c"
 cp "$HERE/files/drivers/net/ethernet/zte/zx279128s-eth.h" \
    "$TREE/target/linux/sanechips/files/drivers/net/ethernet/zte/zx279128s-eth.h"
 cp "$HERE/files/drivers/net/ethernet/zte/zx279128s-main.c" \
    "$TREE/target/linux/sanechips/files/drivers/net/ethernet/zte/zx279128s-main.c"
+cp "$HERE/files/drivers/thermal/zx279128s_thermal.c" \
+   "$TREE/target/linux/sanechips/files/drivers/thermal/zx279128s_thermal.c"
+cp "$HERE/patches-mt76/003-mt76-irq-writel-relaxed.patch" \
+   "$TREE/package/kernel/mt76/patches/003-mt76-irq-writel-relaxed.patch"
 
 echo "[3/7] Removing E2631-only flash/LED/userdata/Chinese scripts..."
 BF="$TREE/target/linux/sanechips/base-files"
@@ -96,11 +104,13 @@ echo "[7/7] Setting kernel command line for Slot rootfs (mtdblock3 on both X3060
 CFG="$TREE/target/linux/sanechips/config-6.18"
 if [ -f "$CFG" ]; then
 	sed -i -e '/^CONFIG_CMDLINE_BOOL=y$/d' -e '/^CONFIG_CMDLINE_FORCE=y$/d' \
-	       -e '/^CONFIG_CMDLINE=/d' "$CFG"
+	       -e '/^CONFIG_CMDLINE=/d' -e '/^CONFIG_HWMON=/d' -e '/^CONFIG_THERMAL_HWMON=/d' "$CFG"
 	cat >> "$CFG" << 'EOF'
 CONFIG_CMDLINE_BOOL=y
 CONFIG_CMDLINE="console=ttyAMA0,115200n8 earlycon root=/dev/mtdblock3 rootfstype=squashfs,jffs2 ro rootwait"
 CONFIG_CMDLINE_FORCE=y
+CONFIG_HWMON=y
+CONFIG_THERMAL_HWMON=y
 EOF
 fi
 

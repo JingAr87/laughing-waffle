@@ -369,3 +369,28 @@
 &l2cc {
 	zte,l2c-io-read-lock;
 };
+
+/ {
+	soc {
+		soc_thermal: temp@94100034 {
+			compatible = "zxic,tempsensor";
+			reg = <0x94100034 0xc>;
+			#thermal-sensor-cells = <0>;
+		};
+	};
+	thermal-zones {
+		soc-thermal {
+			polling-delay-passive = <2000>;
+			polling-delay = <5000>;
+			thermal-sensors = <&soc_thermal>;
+
+			trips {
+				soc_crit: crit {
+					temperature = <110000>;
+					hysteresis = <5000>;
+					type = "critical";
+				};
+			};
+		};
+	};
+};

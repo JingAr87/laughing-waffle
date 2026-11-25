@@ -209,6 +209,7 @@ static void zx_mac_link_down(struct phylink_config *config, unsigned int mode,
 {
 	struct zx_eth_priv *priv = zx_config_to_priv(config);
 
+	priv->link_up = false;
 	zx_port_enable(priv->adapter, priv->port, false);
 	zx_sw_port_down(priv->adapter, priv->port);
 }
@@ -220,6 +221,9 @@ static void zx_mac_link_up(struct phylink_config *config,
 {
 	struct zx_eth_priv *priv = zx_config_to_priv(config);
 
+	priv->speed = speed;
+	priv->duplex = duplex;
+	priv->link_up = true;
 	zx_port_set_speed(priv->adapter, priv->port, speed, duplex);
 	zx_port_enable(priv->adapter, priv->port, true);
 }
@@ -594,6 +598,7 @@ static void zx_tx_reclaim(struct zx_eth_adapter *adapter)
 
 	if (done) {
 		adapter->tx_stall_start = 0;
+		adapter->tx_stall_resets = 0;
 	} else if (adapter->tx_pending >= ZX_TX_QUEUE_LIMIT) {
 		if (!adapter->tx_stall_start) {
 			adapter->tx_stall_start = jiffies ? jiffies : 1;
@@ -602,6 +607,8 @@ static void zx_tx_reclaim(struct zx_eth_adapter *adapter)
 			adapter->tx_pending = 0;
 			adapter->tx_stall_start = 0;
 			adapter->tx_reclaim_resets++;
+			adapter->tx_stall_resets++;
+			schedule_work(&adapter->reset_work);
 		}
 	}
 
@@ -628,7 +635,7 @@ static netdev_tx_t zx_eth_xmit(struct sk_buff *skb, struct net_device *netdev)
 	u8 *buf_ptr;
 	int bp;
 
-	if (len > 1536) {
+	if (unlikely(!priv->link_up) || len > 1536) {
 		dev_kfree_skb_any(skb);
 		dev_dstats_tx_dropped(netdev);
 		return NETDEV_TX_OK;
@@ -682,12 +689,9 @@ static netdev_tx_t zx_eth_xmit(struct sk_buff *skb, struct net_device *netdev)
 	 * forward between ports: the Linux bridge does, one netdev per port.
 	 */
 	desc[0] = cpu_to_le32(0x80 | (ZX_PORT_TX_QUEUE(priv->port) << 20));
+	desc[1] = cpu_to_le32(0x10000 | (((u32)(bp & 0x7f)) << 25));
+	desc[2] = cpu_to_le32(0x21000000 | ((len & 0x3fff) << 9) | ((u32)bp >> 7));
 	desc[3] = cpu_to_le32(0x3 | ((len & 0x3fff) << 2));
-	desc[1] = cpu_to_le32(0x10000);
-	desc[2] = cpu_to_le32(0x21000000 | ((len & 0x3fff) << 9));
-
-	((u8 *)desc)[7] = (u8)((bp & 0x7f) << 1);
-	((u8 *)desc)[8] = (u8)(bp >> 7);
 
 	dma_wmb();
 	writel(1, base + ZX_DMA_TX_START);
@@ -923,6 +927,7 @@ static int zx_eth_open(struct net_device *netdev)
 	if (adapter->open_count == 0) {
 		napi_enable(&adapter->napi);
 		writel_relaxed(~ZX_TM_INT_RX, adapter->base + ZX_TM_INT_MASK);
+		schedule_delayed_work(&adapter->stall_work, HZ);
 	}
 	adapter->open_count++;
 
@@ -942,6 +947,7 @@ static int zx_eth_stop(struct net_device *netdev)
 
 	if (adapter->open_count == 0) {
 		writel(~0, adapter->base + ZX_TM_INT_MASK);
+		cancel_delayed_work_sync(&adapter->stall_work);
 		hrtimer_cancel(&adapter->tx_timer);
 		napi_disable(&adapter->napi);
 		/* a last poll may have unmasked it again */
@@ -977,25 +983,102 @@ static int zx_eth_ioctl(struct net_device *netdev, struct ifreq *ifr, int cmd)
 	return phylink_mii_ioctl(priv->phylink, ifr, cmd);
 }
 
+static void zx_eth_reset_work(struct work_struct *work)
+{
+	struct zx_eth_adapter *adapter =
+		container_of(work, struct zx_eth_adapter, reset_work);
+	int p, ret;
+
+	rtnl_lock();
+	for (p = 0; p < ZX_NUM_PORTS; p++)
+		if (adapter->ports[p])
+			netif_stop_queue(adapter->ports[p]);
+
+	hrtimer_cancel(&adapter->tx_timer);
+	if (adapter->open_count) {
+		napi_disable(&adapter->napi);
+		writel(~0, adapter->base + ZX_TM_INT_MASK);
+		synchronize_irq(adapter->irq);
+	}
+
+	ret = zx_hw_init(adapter);
+	spin_lock_bh(&adapter->tx_lock);
+	adapter->tx_stall_start = 0;
+	adapter->tx_stall_resets = 0;
+	spin_unlock_bh(&adapter->tx_lock);
+
+	if (!ret) {
+		mutex_lock(&adapter->ppe_lock);
+		zx_update_mac_tables(adapter);
+		mutex_unlock(&adapter->ppe_lock);
+		zx_dma_enable(adapter, true);
+
+		for (p = 0; p < ZX_NUM_PORTS; p++) {
+			struct zx_eth_priv *priv;
+
+			if (!adapter->ports[p])
+				continue;
+			priv = netdev_priv(adapter->ports[p]);
+			if (priv->link_up) {
+				zx_port_set_speed(adapter, p, priv->speed, priv->duplex);
+				zx_port_enable(adapter, p, true);
+			}
+		}
+		adapter->hw_resets++;
+		dev_warn(adapter->dev, "Ethernet DMA stall recovered (hw_resets=%u)\n",
+			 adapter->hw_resets);
+	} else {
+		dev_err(adapter->dev, "Ethernet DMA recovery failed: %d\n", ret);
+	}
+
+	if (adapter->open_count) {
+		napi_enable(&adapter->napi);
+		writel_relaxed(~ZX_TM_INT_RX, adapter->base + ZX_TM_INT_MASK);
+	}
+	for (p = 0; p < ZX_NUM_PORTS; p++)
+		if (adapter->ports[p])
+			netif_wake_queue(adapter->ports[p]);
+	rtnl_unlock();
+}
+
+static void zx_eth_stall_work(struct work_struct *work)
+{
+	struct zx_eth_adapter *adapter =
+		container_of(work, struct zx_eth_adapter, stall_work.work);
+	bool trigger_reset = false;
+
+	spin_lock_bh(&adapter->tx_lock);
+	if (adapter->tx_pending)
+		zx_tx_reclaim(adapter);
+	if (adapter->tx_pending >= 8) {
+		if (adapter->stall_armed &&
+		    adapter->tx_complete_cnt == adapter->last_tx_complete) {
+			trigger_reset = true;
+			adapter->stall_armed = false;
+		} else {
+			adapter->last_tx_complete = adapter->tx_complete_cnt;
+			adapter->stall_armed = true;
+		}
+	} else {
+		adapter->stall_armed = false;
+	}
+	spin_unlock_bh(&adapter->tx_lock);
+
+	if (trigger_reset)
+		schedule_work(&adapter->reset_work);
+
+	if (adapter->open_count)
+		schedule_delayed_work(&adapter->stall_work, HZ);
+}
+
 static void zx_eth_tx_timeout(struct net_device *netdev, unsigned int txqueue)
 {
 	struct zx_eth_priv *priv = netdev_priv(netdev);
 	struct zx_eth_adapter *adapter = priv->adapter;
-	int p;
 
-	netdev_warn(netdev, "TX timeout (tx_pending=%u, resets=%u), resetting tx_pending\n",
+	netdev_warn(netdev, "TX timeout (tx_pending=%u, resets=%u), scheduling DMA recovery\n",
 		    adapter->tx_pending, adapter->tx_reclaim_resets);
-	spin_lock_bh(&adapter->tx_lock);
-	zx_tx_reclaim(adapter);
-	if (adapter->tx_pending >= ZX_TX_QUEUE_LIMIT) {
-		adapter->tx_pending = 0;
-		adapter->tx_stall_start = 0;
-		adapter->tx_reclaim_resets++;
-		for (p = 0; p < ZX_NUM_PORTS; p++)
-			if (adapter->ports[p] && netif_queue_stopped(adapter->ports[p]))
-				netif_wake_queue(adapter->ports[p]);
-	}
-	spin_unlock_bh(&adapter->tx_lock);
+	schedule_work(&adapter->reset_work);
 }
 
 static const struct net_device_ops zx_netdev_ops = {
@@ -1202,10 +1285,10 @@ static int zx_eth_dma_state_show(struct seq_file *s, void *data)
 	rtnl_lock();
 	seq_printf(s, "arena=%pad open_count=%d\n",
 		   &adapter->buf_pool_dma, adapter->open_count);
-	seq_printf(s, "tx_submitted=%u tx_completed=%u tx_pending=%u tx_done_excess=%u tx_reclaim_resets=%u rx_resync=%u\n",
+	seq_printf(s, "tx_submitted=%u tx_completed=%u tx_pending=%u tx_done_excess=%u tx_reclaim_resets=%u hw_resets=%u rx_resync=%u\n",
 		   adapter->tx_cur_idx, adapter->tx_complete_cnt,
 		   adapter->tx_pending, adapter->tx_done_excess,
-		   adapter->tx_reclaim_resets, adapter->rx_resync_cnt);
+		   adapter->tx_reclaim_resets, adapter->hw_resets, adapter->rx_resync_cnt);
 	seq_printf(s, "dma_1fc=%08x tm_int_st=%08x tm_int_msk=%08x\n",
 		   readl(adapter->base + ZX_DMA_BASE + 0x1fc),
 		   readl(adapter->base + ZX_TM_INT_STATUS),
@@ -1318,6 +1401,8 @@ static int zx_eth_probe(struct platform_device *pdev)
 	mutex_init(&adapter->sw_lock);
 	spin_lock_init(&adapter->sw_fdb_lock);
 	INIT_WORK(&adapter->sw_work, zx_sw_work);
+	INIT_WORK(&adapter->reset_work, zx_eth_reset_work);
+	INIT_DELAYED_WORK(&adapter->stall_work, zx_eth_stall_work);
 	mutex_init(&adapter->mib_lock);
 	INIT_DELAYED_WORK(&adapter->mib_work, zx_mib_work);
 	adapter->base = devm_platform_ioremap_resource(pdev, 0);
