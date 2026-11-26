@@ -245,7 +245,7 @@ void zx_idm_learn_lan_mac(struct zx_eth_adapter *adapter, const u8 *mac)
 	WRITE_ONCE(adapter->idm_lan_tab[h].valid, 1);
 }
 
-static bool zx_idm_is_lan_mac(struct zx_eth_adapter *adapter, const u8 *mac)
+static __maybe_unused bool zx_idm_is_lan_mac(struct zx_eth_adapter *adapter, const u8 *mac)
 {
 	u8 h = zx_idm_mac_hash(mac);
 
@@ -330,12 +330,13 @@ static u32 zx_idm_tx_reclaim_locked(struct zx_eth_adapter *adapter,
 {
 	void __iomem *base = adapter->base;
 	u32 done = readl_relaxed(base + ZX_IDM_TX_DONE_CNT) & 0xffff;
+	u32 submitted = adapter->idm_tx_pending - adapter->idm_tx_unflushed;
 	u32 n, i, freed = 0;
 
-	if (!done)
+	if (!done || !submitted)
 		return 0;
 
-	n = min_t(u32, done, adapter->idm_tx_pending);
+	n = min_t(u32, done, submitted);
 	if (n > max_free)
 		n = max_free;
 
@@ -354,8 +355,11 @@ static u32 zx_idm_tx_reclaim_locked(struct zx_eth_adapter *adapter,
 
 	adapter->idm_tx_pending -= n;
 	adapter->idm_tx_done += n;
-	/* Acknowledge completed TX descriptors in [15:0] (no DMA submission) */
-	writel_relaxed(n & 0xffff, base + ZX_IDM_TX_DOORBELL);
+	/* Acknowledge completed TX descriptors in [15:0] and readback so
+	 * the other CPU cannot observe a stale TX_DONE_CNT and underflow it.
+	 */
+	writel(n & 0xffff, base + ZX_IDM_TX_DOORBELL);
+	(void)readl_relaxed(base + ZX_IDM_TX_DONE_CNT);
 	return freed;
 }
 
@@ -460,13 +464,13 @@ bool zx_idm_wifi_rx(struct sk_buff *skb)
 		return false;
 	}
 
-	/* L2 LAN unicast or L3 PPE-offloaded IPv4 SNAT unicast */
-	if (READ_ONCE(adapter->sw_members) & BIT(ZX_IDM_BRPORT(idm_port)) &&
-	    zx_idm_is_lan_mac(adapter, eth->h_dest)) {
-		is_l2 = true;
-	} else if (READ_ONCE(adapter->idm_br_mac_valid) &&
-		   ether_addr_equal(eth->h_dest, adapter->idm_br_mac) &&
-		   zx_idm_check_l3_ul(adapter, skb)) {
+	/* L3 PPE-offloaded IPv4 SNAT unicast (WAN <-> Wi-Fi).
+	 * L2 LAN <-> Wi-Fi UL stays on the stall-free Linux bridge/GMAC path
+	 * because sustained L2 IDM TX bursts into sbrg can stall after ~8 s.
+	 */
+	if (READ_ONCE(adapter->idm_br_mac_valid) &&
+	    ether_addr_equal(eth->h_dest, adapter->idm_br_mac) &&
+	    zx_idm_check_l3_ul(adapter, skb)) {
 		is_l3 = true;
 	} else {
 		rcu_read_unlock();
@@ -677,9 +681,9 @@ static int zx_idm_poll(struct napi_struct *napi, int budget)
 		skb_reserve(skb, ZX_IDM_RX_HEADROOM);
 		skb_put(skb, len);
 		skb->dev = tx_dev;
-		skb->protocol = eth_hdr(skb)->h_proto;
 		skb_reset_mac_header(skb);
 		skb_set_network_header(skb, ETH_HLEN);
+		skb->protocol = eth_hdr(skb)->h_proto;
 
 		dev_queue_xmit(skb);
 		adapter->idm_rx_pkts++;
@@ -729,7 +733,8 @@ static int zx_idm_hw_init(struct zx_eth_adapter *adapter)
 	/* Mask all IDM IRQs */
 	writel(ZX_IDM_INT_ALL, base + ZX_IDM_INT_MASK);
 
-	/* Stock pon_npp_idm_init(): byteorder LE + ctrl[27:20]=0x02 */
+	/* Stock pon_npp_idm_init(): wifi_mac_len = 1600 + byteorder LE + ctrl[27:20]=0x02 */
+	writel(1600, base + 0x3a0028);
 	writel(0, base + ZX_IDM_DMA_CTRL2);
 	val = readl(base + ZX_IDM_CTRL);
 	val &= ~0x0fff0000;
@@ -942,10 +947,12 @@ void zx_idm_debugfs_show(struct zx_eth_adapter *adapter, struct seq_file *s)
 		   adapter->idm_rx_pkts, adapter->idm_rx_drop,
 		   adapter->idm_rx_bcmc_drop, adapter->idm_rx_nomap,
 		   readl(adapter->base + ZX_IDM_RX_AVAIL_CNT) & 0xffff);
-	seq_printf(s, "idm_tx_l2=%u idm_tx_l3=%u idm_tx_done=%u idm_tx_pending=%u idm_tx_full=%u idm_cpu_fb=%u\n",
+	seq_printf(s, "idm_tx_l2=%u idm_tx_l3=%u idm_tx_done=%u idm_tx_pending=%u idm_tx_full=%u idm_hw_tx_done=%u idm_cpu_fb=%u\n",
 		   adapter->idm_tx_l2, adapter->idm_tx_l3,
 		   adapter->idm_tx_done, adapter->idm_tx_pending,
-		   adapter->idm_tx_full, adapter->idm_cpu_fallback);
+		   adapter->idm_tx_full,
+		   readl(adapter->base + ZX_IDM_TX_DONE_CNT) & 0xffff,
+		   adapter->idm_cpu_fallback);
 	seq_puts(s, "idm_wifi_devs=");
 	for (i = 0; i < ZX_IDM_MAX_WIFI_DEVS; i++) {
 		struct net_device *d = READ_ONCE(adapter->idm_wifi_devs[i]);

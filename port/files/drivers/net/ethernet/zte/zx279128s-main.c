@@ -415,6 +415,7 @@ static void zx_pp_init(struct zx_eth_adapter *adapter)
 	 * Initialize it ourselves, while DMA and the MACs are quiesced.  These
 	 * are the H3600 bootloader's PP reset, bridge and classifier settings.
 	 */
+	writel(0x01070104, base + 0x380028);
 	writel(2, base + ZX_PP_RESET);
 	usleep_range(1000, 2000);
 
@@ -498,11 +499,10 @@ static int zx_hw_init(struct zx_eth_adapter *adapter)
 		tab[i] = cpu_to_be16(i);
 
 	dma_wmb();
-	if (of_machine_is_compatible("zte,zx279128r")) {
-		/* Stock tm_pon_tm_init() */
-		writel(0x00001fff, base + ZX_TM_BASE + 0x128);
-		writel(0x001fffff, base + ZX_TM_BASE + 0x130);
-	}
+	/* Stock tm_pon_tm_init() (both ZX279128R and ZX279128S) */
+	writel(0x00001fff, base + ZX_TM_BASE + 0x128);
+	writel(0x001fffff, base + ZX_TM_BASE + 0x130);
+	usleep_range(1000, 2000);
 	ret = zx_tm_init(adapter);
 	if (ret)
 		return dev_err_probe(adapter->dev, ret, "TM table setup timed out\n");
@@ -545,12 +545,13 @@ static int zx_hw_init(struct zx_eth_adapter *adapter)
 	writel(ZX_NUM_BUFFERS << 16, base + ZX_BMU_THRES1);
 	writel(0x2000000,  base + ZX_BMU_THRES2);
 	writel(0,          base + ZX_BMU_BUF_ALLOC);
-	/* Stock pon_tm_red_init() + tm_pon_tm_init() */
+	/* Stock pon_tm_red_init() + tm_pon_tm_init():
+	 * ZX279128S (plat-zxylzb_9128S.ko) must NOT clear bit 7 of 0x344004.
+	 */
 	if (of_machine_is_compatible("zte,zx279128r"))
 		writel(readl(base + ZX_TM_BASE + 0x4004) & ~0x80, base + ZX_TM_BASE + 0x4004);
 	writel(ZX_BMU_CTRL_EN, base + ZX_BMU_CTRL);
-	if (of_machine_is_compatible("zte,zx279128r"))
-		writel(0, base + ZX_TM_BASE + 0xc008);
+	writel(0, base + ZX_TM_BASE + 0xc008);
 
 	writel(17, base + 0x3a00e0);
 
@@ -576,21 +577,24 @@ static int zx_hw_init(struct zx_eth_adapter *adapter)
 
 	/* Stock tm_pon_npp_init() + pon_npp_smct_init() + pon_npp_uopc_init():
 	 * Restores SMCT buffer watermarks (0x1d0000..0x1d0010) and UOPC MAC
-	 * empty-resume enable (0x1d8000 bit 3) after ZX_GLB_RESET on ZX279128R.
-	 * Without these, 100 Mbps egress backpressure wedges the shared DMA engine.
-	 * Gated to ZX279128R because ZX279128S (F6600P) breaks Ethernet RX with these writes.
+	 * empty-resume enable (0x1d8000 bit 3) after ZX_GLB_RESET.
+	 * Verified from stock plat-zxic_128s.ko (ZX279128R: 11/220/200) and
+	 * plat-zxylzb_9128S.ko (ZX279128S: 11/11/128).
 	 */
-	if (of_machine_is_compatible("zte,zx279128r")) {
+	{
+		bool is_128r = of_machine_is_compatible("zte,zx279128r");
+
 		writel(0x00ffffff, base + 0x1c0008);
 		writel(0x000fffff, base + 0x1c000c);
-		writel(11,         base + 0x1d0000);
-		writel(220,        base + 0x1d0004);
-		writel(200,        base + 0x1d0008);
-		writel(0x3810,     base + 0x1d0010);
-		writel(0xffffffff, base + 0x1c0004);
-		writel(0,          base + 0x1c0048);
+		msleep(1);
+		writel(11,                  base + 0x1d0000);
+		writel(is_128r ? 220 : 11,  base + 0x1d0004);
+		writel(is_128r ? 200 : 128, base + 0x1d0008);
+		writel(0x3810,              base + 0x1d0010);
+		writel(0xffffffff,          base + 0x1c0004);
+		writel(0,                   base + 0x1c0048);
 		writel(readl(base + 0x1c0040) | 0x300, base + 0x1c0040);
-		writel(readl(base + 0x1d8000) | 8, base + 0x1d8000);
+		writel(readl(base + 0x1d8000) | 8,     base + 0x1d8000);
 	}
 
 	/* 6. Switch: enable forwarding */
@@ -1116,8 +1120,14 @@ static void zx_eth_reset_work(struct work_struct *work)
 			if (!adapter->ports[p])
 				continue;
 			priv = netdev_priv(adapter->ports[p]);
-			if (priv->link_up)
-				zx_mac_port_configure(adapter, p, priv->speed, priv->duplex);
+			if (priv->link_up) {
+				if (of_machine_is_compatible("zte,zx279128r")) {
+					zx_mac_port_configure(adapter, p, priv->speed, priv->duplex);
+				} else {
+					zx_port_set_speed(adapter, p, priv->speed, priv->duplex);
+					zx_port_enable(adapter, p, true);
+				}
+			}
 		}
 		adapter->hw_resets++;
 		dev_warn(adapter->dev, "Ethernet DMA stall recovered (hw_resets=%u)\n",
